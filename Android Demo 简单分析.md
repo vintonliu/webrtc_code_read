@@ -1,8 +1,12 @@
+# Android Demo 简单分析
+----
+[TOC]
+
 ## 1 PeerConnection 创建
 
 音视频互通需要先创建 PeerConnection，然后通过创建及交换 Sdp，以完成通话建立。
 
-### 1.1 PeerConnectionFactory 创建
+### 1.1 创建 PeerConnectionFactory 
 
 ```java
 // CallActivity.java
@@ -325,8 +329,12 @@ static base::android::ScopedJavaLocalRef<jobject> Java_PeerConnectionFactory_Con
 ```
 
 ### 1.2 创建 PeerConnection
+1. 连接上房间服务器；
+2. 若使能视频，则先创建视频采集源；
+3. 创建 PeerConnection；
+
 ```java
-// PeerConnectionClient.java
+// CallActivity.java
 /* 信令层连接房间服务器成功, 创建 PeerConnection, 若是主叫端则创建 offer sdp，若是被叫端则需设置远端 Sdp 及创建本端 Sdp */
 private void onConnectedToRoomInternal(final SignalingParameters params) {
     final long delta = System.currentTimeMillis() - callStartedTimeMs;
@@ -365,6 +373,305 @@ private void onConnectedToRoomInternal(final SignalingParameters params) {
 }
 ```
 
+```java
+// PeerConnectionClient.java
+public void createPeerConnection(final VideoSink localRender, final VideoSink remoteSink,
+      final VideoCapturer videoCapturer, final SignalingParameters signalingParameters) {
+    if (peerConnectionParameters.videoCallEnabled && videoCapturer == null) {
+        Log.w(TAG, "Video call enabled but no video capturer provided.");
+    }
+    createPeerConnection(
+        localRender, Collections.singletonList(remoteSink), videoCapturer, signalingParameters);
+}
+
+public void createPeerConnection(final VideoSink localRender, final List<VideoSink> remoteSinks,
+      final VideoCapturer videoCapturer, final SignalingParameters signalingParameters) {
+    if (peerConnectionParameters == null) {
+        Log.e(TAG, "Creating peer connection without initializing factory.");
+        return;
+    }
+    // 本地预览的 sink
+    this.localRender = localRender;
+    // 远端渲染的 sink
+    this.remoteSinks = remoteSinks;
+    // 视频源实例
+    this.videoCapturer = videoCapturer;
+    this.signalingParameters = signalingParameters;
+    executor.execute(() -> {
+      try {
+            createMediaConstraintsInternal();
+            createPeerConnectionInternal();
+            maybeCreateAndStartRtcEventLog();
+      } catch (Exception e) {
+            reportError("Failed to create peer connection: " + e.getMessage());
+            throw e;
+      }
+    });
+}
+
+private void createPeerConnectionInternal() {
+    if (factory == null || isError) {
+      Log.e(TAG, "Peerconnection factory is not created");
+      return;
+    }
+    Log.d(TAG, "Create peer connection.");
+
+    queuedRemoteCandidates = new ArrayList<>();
+
+    PeerConnection.RTCConfiguration rtcConfig =
+        new PeerConnection.RTCConfiguration(signalingParameters.iceServers);
+    // TCP candidates are only useful when connecting to a server that supports
+    // ICE-TCP.
+    rtcConfig.tcpCandidatePolicy = PeerConnection.TcpCandidatePolicy.DISABLED;
+    rtcConfig.bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE;
+    rtcConfig.rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE;
+    rtcConfig.continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY;
+    // Use ECDSA encryption.
+    rtcConfig.keyType = PeerConnection.KeyType.ECDSA;
+    // Enable DTLS for normal calls and disable for loopback calls.
+    rtcConfig.enableDtlsSrtp = !peerConnectionParameters.loopback;
+    rtcConfig.sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN;
+
+    /* 创建 PeerConnection */
+    peerConnection = factory.createPeerConnection(rtcConfig, pcObserver);
+
+    if (dataChannelEnabled) {
+        /* create data channel */
+        ...
+    }
+    isInitiator = false;
+
+    // Set INFO libjingle logging.
+    // NOTE: this _must_ happen while |factory| is alive!
+    Logging.enableLogToDebugOutput(Logging.Severity.LS_INFO);
+
+    List<String> mediaStreamLabels = Collections.singletonList("ARDAMS");
+    if (isVideoCallEnabled()) {
+        /* 创建并添加视频源到 PeerConnection, 创建 VideoTrack 时将启动视频源采集 */
+        peerConnection.addTrack(createVideoTrack(videoCapturer), mediaStreamLabels);
+
+        // We can add the renderers right away because we don't need to wait for an
+        // answer to get the remote track.
+        remoteVideoTrack = getRemoteVideoTrack();
+        remoteVideoTrack.setEnabled(renderVideo);
+        for (VideoSink remoteSink : remoteSinks) {
+            remoteVideoTrack.addSink(remoteSink);
+        }
+    }
+    peerConnection.addTrack(createAudioTrack(), mediaStreamLabels);
+    if (isVideoCallEnabled()) {
+        findVideoSender();
+    }
+
+    ...
+
+    Log.d(TAG, "Peer connection created.");
+}
+```
+
+```java
+// sdk/android/api/org/webrtc/PeerConnectionFactory.java
+public PeerConnection createPeerConnection(
+      PeerConnection.RTCConfiguration rtcConfig, PeerConnection.Observer observer) {
+    return createPeerConnection(rtcConfig, null /* constraints */, observer);
+}
+
+PeerConnection createPeerConnectionInternal(PeerConnection.RTCConfiguration rtcConfig,
+      MediaConstraints constraints/* null */, PeerConnection.Observer observer,
+      SSLCertificateVerifier sslCertificateVerifier/* null */) {
+    checkPeerConnectionFactoryExists();
+    // 创建 PeerConnection.Observer 的 Native 层关联对象
+    long nativeObserver = PeerConnection.createNativePeerConnectionObserver(observer);
+    if (nativeObserver == 0) {
+        return null;
+    }
+    long nativePeerConnection = nativeCreatePeerConnection(
+        nativeFactory, rtcConfig, constraints, nativeObserver, sslCertificateVerifier);
+    if (nativePeerConnection == 0) {
+        return null;
+    }
+    return new PeerConnection(nativePeerConnection);
+}
+
+// sdk/android/api/org/webrtc/PeerConnection.java
+PeerConnection(long nativePeerConnection) {
+    this.nativePeerConnection = nativePeerConnection;
+}
+```
+
+绑定 Java 层 PeerConnection Observer 对象，后续通过该 Observer 将 Native 层事件回调到 Java 层。
+其中，PeerConnectionObserverJni 为Android端 PeerConnectionObserver 的实现类。
+```c++
+// out/android_arm64_Debug/gen/sdk/android/generated_peerconnection_jni/PeerConnection_jni.h
+// 该文件根据 PeerConnection.java 生成
+JNI_GENERATOR_EXPORT jlong Java_org_webrtc_PeerConnection_nativeCreatePeerConnectionObserver(
+    JNIEnv* env,
+    jclass jcaller,
+    jobject observer) {
+  return JNI_PeerConnection_CreatePeerConnectionObserver(env,
+      base::android::JavaParamRef<jobject>(env, observer));
+}
+
+// sdk/android/src/jni/pc/peer_connection.cc
+static jlong JNI_PeerConnection_CreatePeerConnectionObserver(
+    JNIEnv* jni,
+    const JavaParamRef<jobject>& j_observer) {
+  return jlongFromPointer(new PeerConnectionObserverJni(jni, j_observer));
+}
+
+PeerConnectionObserverJni::PeerConnectionObserverJni(
+    JNIEnv* jni,
+    const JavaRef<jobject>& j_observer)
+    // 创建 Observer Object 的 global 引用
+    : j_observer_global_(jni, j_observer) {}
+```
+
+创建 Native 层 PeerConnection 对象
+```c++
+// out/android_arm64_Debug/gen/sdk/android/generated_peerconnection_jni/PeerConnection_factory_jni.h
+// 该文件根据 sdk/android/api/org/webrtc/PeerConnectionFactory.java 在编译时动态生成
+/* 创建 Native 层 PeerConnection 对象 */
+JNI_GENERATOR_EXPORT jlong Java_org_webrtc_PeerConnectionFactory_nativeCreatePeerConnection(
+    JNIEnv* env,
+    jclass jcaller,
+    jlong factory,
+    jobject rtcConfig,
+    jobject constraints, // null
+    jlong nativeObserver,
+    jobject sslCertificateVerifier) {
+  return JNI_PeerConnectionFactory_CreatePeerConnection(env, factory,
+      base::android::JavaParamRef<jobject>(env, rtcConfig),
+      base::android::JavaParamRef<jobject>(env, constraints), nativeObserver,
+      base::android::JavaParamRef<jobject>(env, sslCertificateVerifier));
+}
+
+// sdk/android/src/jni/pc/peer_connection_factory.cc
+static jlong JNI_PeerConnectionFactory_CreatePeerConnection(
+    JNIEnv* jni,
+    jlong factory,
+    const JavaParamRef<jobject>& j_rtc_config,
+    const JavaParamRef<jobject>& j_constraints, /* null */
+    jlong observer_p,
+    const JavaParamRef<jobject>& j_sslCertificateVerifier /* null */) {
+    /* PeerConnectionObserver */
+    std::unique_ptr<PeerConnectionObserver> observer(
+        reinterpret_cast<PeerConnectionObserver*>(observer_p));
+
+    // RTCConfiguration 拷贝
+    ...
+
+    // rtc::RTCCertificate 生成
+    ...
+
+    // MediaConstraints 拷贝
+    ...
+
+    PeerConnectionDependencies peer_connection_dependencies(observer.get());
+
+    // SSLCertificateVerifierWrapper 创建
+    ...
+
+    /* 创建 PeerConnection，该接口调用与各平台一致 */
+    rtc::scoped_refptr<PeerConnectionInterface> pc =
+        PeerConnectionFactoryFromJava(factory)->CreatePeerConnection(
+            rtc_config, std::move(peer_connection_dependencies));
+    if (!pc)
+        return 0;
+
+    /* 返回 PeerConnection 封装对象 */
+    return jlongFromPointer(
+        new OwnedPeerConnection(pc, std::move(observer), std::move(constraints)));
+}
+
+// pc/peer_connection_factory.cc
+rtc::scoped_refptr<PeerConnectionInterface>
+PeerConnectionFactory::CreatePeerConnection(
+    const PeerConnectionInterface::RTCConfiguration& configuration,
+    PeerConnectionDependencies dependencies) {
+    
+    ...
+    // 创建 PeerConnection
+    rtc::scoped_refptr<PeerConnection> pc(
+        new rtc::RefCountedObject<PeerConnection>(this, std::move(event_log),
+                                                    std::move(call)));
+    ActionsBeforeInitializeForTesting(pc);
+    // PeerConnection 初始化
+    if (!pc->Initialize(configuration, std::move(dependencies))) {
+        return nullptr;
+    }
+    return PeerConnectionProxy::Create(signaling_thread(), pc);
+}
+```
+
+### 1.3 创建 VideoTrack
+1. 创建视频渲染处理 SurfaceTextureHelper；
+2. 创建 VideoSource;
+3. 初始化视频采集源并启动，设置视频数据回调监听为 VideoSource 内实现的 CapturerObserver；
+4. 创建 VideoTrack，并作为 VideoSink 注册到 VideoSource 内；
+5. VideoTrack 使能视频渲染；
+6. VideoTrack 添加本地预览Sink。
+
+```java
+// PeerConnectionClient.java
+private VideoTrack createVideoTrack(VideoCapturer capturer) {
+    // 视频源纹理数据渲染实例，经过该实例纹理处理后的数据通过 CapturerObserver 回调出来用于编码或预览(Camera2)
+    surfaceTextureHelper =
+        SurfaceTextureHelper.create("CaptureThread", rootEglBase.getEglBaseContext());
+    
+    // 创建 VideoSource
+    videoSource = factory.createVideoSource(capturer.isScreencast());
+
+    // 初始化及启动视频采集，摄像头的话，调用 CameraCapturer.initialize() 接口初始化，CapturerObserver 为 VideoSource 创建
+    capturer.initialize(surfaceTextureHelper, appContext, videoSource.getCapturerObserver());
+
+    capturer.startCapture(videoWidth, videoHeight, videoFps);
+
+    // 创建 VideoTrack
+    localVideoTrack = factory.createVideoTrack(VIDEO_TRACK_ID, videoSource);
+    // 使能视频
+    localVideoTrack.setEnabled(renderVideo);
+    // 设置预览 Sink
+    localVideoTrack.addSink(localRender);
+    return localVideoTrack;
+}
+
+// sdk/android/api/org/webrtc/SurfaceTextureHelper.java
+public static SurfaceTextureHelper create(
+      final String threadName, final EglBase.Context sharedContext) {
+    return create(threadName, sharedContext, /* alignTimestamps= */ false, new YuvConverter(),
+        /*frameRefMonitor=*/null);
+}
+
+private SurfaceTextureHelper(Context sharedContext, Handler handler, boolean alignTimestamps,
+      YuvConverter yuvConverter, FrameRefMonitor frameRefMonitor) {
+    if (handler.getLooper().getThread() != Thread.currentThread()) {
+        throw new IllegalStateException("SurfaceTextureHelper must be created on the handler thread");
+    }
+    this.handler = handler;
+    this.timestampAligner = alignTimestamps ? new TimestampAligner() : null;
+    this.yuvConverter = yuvConverter;
+    this.frameRefMonitor = frameRefMonitor;
+
+    eglBase = EglBase.create(sharedContext, EglBase.CONFIG_PIXEL_BUFFER);
+    try {
+        // Both these statements have been observed to fail on rare occasions, see BUG=webrtc:5682.
+        eglBase.createDummyPbufferSurface();
+        eglBase.makeCurrent();
+    } catch (RuntimeException e) {
+        // Clean up before rethrowing the exception.
+        eglBase.release();
+        handler.getLooper().quit();
+        throw e;
+    }
+
+    oesTextureId = GlUtil.generateTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES);
+    surfaceTexture = new SurfaceTexture(oesTextureId);
+    setOnFrameAvailableListener(surfaceTexture, (SurfaceTexture st) -> {
+        hasPendingTexture = true;
+        tryDeliverTextureFrame();
+    }, handler);
+}
+```
 
 ## 2 音频设备模块(AudioDeviceModule)
 
@@ -744,7 +1051,7 @@ public void setNativeAudioTrack(long nativeAudioTrack) {
 ```
 
 ## 3 视频图像采集模块(VideoCapturer)
-视频采集源分为视频文件，屏幕共享及摄像头，这几类统一继承了 VideoCapturer 类。
+视频采集源分为视频文件，屏幕共享及摄像头，这几类视频源统一继承了 VideoCapturer 类。其中摄像头采集源的通过 CameraEnumerator、CameraSession、CameraCapturer 连接不同 Camera API， 其中 Camera1Enumerator、Camera1Session， Camera1Capturer 连接 Camera V1 Api(即Android 5之前的摄像头接口) ；而 Camera2Enumerator、Camera2Session， Camera2Capturer 连接 Camera V2 接口。这两套接口封装了新旧 Camera Api的差异性，使外部调用保持一致。
 
 ```puml
 @startuml
@@ -778,6 +1085,11 @@ interface CameraVideoCapturer {
 }
 
 abstract class CameraCapturer {
+    # {abstract} void createCameraSession()
+    ..
+    - void createSessionInternal(int delayMs)
+    ..
+    - void switchCameraInternal()
     -- field --
     - {field} CameraEnumerator cameraEnumerator
     ..
@@ -797,7 +1109,7 @@ CameraCapturer::capturerObserver *-- CapturerObserver
 CameraCapturer::cameraEnumerator *-- CameraEnumerator
 CameraCapturer::createSessionCallback *-- CameraSession.CreateSessionCallback
 CameraCapturer::cameraSessionEventsHandler *-- CameraSession.Events
-
+CameraCapturer::currentSession *-- CameraSession
 
 class ScreenCapturerAndroid {
 
@@ -813,9 +1125,51 @@ VideoCapturer <|-- FileVideoCapturer
 
 CameraVideoCapturer <|-- CameraCapturer
 
-interface CameraSession {
-    
+class Camera1Capturer {
+    + Camera1Capturer()
+    ..
+    # {method} void createCameraSession()
 }
+
+class Camera2Capturer {
+    + Camera2Capturer()
+    ..
+    # {method} void createCameraSession()
+}
+
+CameraCapturer <|-- Camera1Capturer
+CameraCapturer <|-- Camera2Capturer
+
+interface CameraSession {
+    + void stop()
+    ..
+    + {static} int getDeviceOrientation(Context context)
+    ..
+    + {static} VideoFrame.TextureBuffer createTextureBufferWithModifiedTransformMatrix(
+      TextureBufferImpl buffer, boolean mirror, int rotation)
+}
+
+class Camera1Session {
+    + {static} void create()
+    ..
+    - void startCapturing()
+    ..
+    - void listenForTextureFrames()
+    ..
+    - void listenForBytebufferFrames()
+    ..
+    - int getFrameOrientation()
+}
+
+class Camera2Session {
+    + {static} void create()
+    ..
+    - void start()
+    ..
+    - int getFrameOrientation()
+}
+CameraSession <|-- Camera1Session
+CameraSession <|-- Camera2Session
 
 interface CameraSession.CreateSessionCallback {
     + void onDone(CameraSession session)
@@ -866,6 +1220,9 @@ CameraEnumerator <|-- Camera2Enumerator
 @enduml
 ```
 
+### 3.1 创建摄像头采集源(CameraVideoCapturer)
+
+创建视频采集源， Demo 端调用入口。
 ```java
 // CallActivity.java
 private @Nullable VideoCapturer createVideoCapturer() {
@@ -903,6 +1260,7 @@ private @Nullable VideoCapturer createVideoCapturer() {
     return videoCapturer;
 }
 
+// 创建摄像头采集源
 private @Nullable VideoCapturer createCameraCapturer(CameraEnumerator enumerator) {
     /* 获取设备摄像头信息 */
     final String[] deviceNames = enumerator.getDeviceNames();
@@ -913,7 +1271,7 @@ private @Nullable VideoCapturer createCameraCapturer(CameraEnumerator enumerator
     for (String deviceName : deviceNames) {
         if (enumerator.isFrontFacing(deviceName)) {
             Logging.d(TAG, "Creating front facing camera capturer.");
-            VideoCapturer videoCapturer = enumerator.createCapturer(deviceName, null);
+            VideoCapturer videoCapturer = enumerator.createCapturer(deviceName, /* CameraEventsHandler */null);
 
             if (videoCapturer != null) {
                 return videoCapturer;
@@ -927,7 +1285,7 @@ private @Nullable VideoCapturer createCameraCapturer(CameraEnumerator enumerator
     for (String deviceName : deviceNames) {
         if (!enumerator.isFrontFacing(deviceName)) {
             Logging.d(TAG, "Creating other camera capturer.");
-            VideoCapturer videoCapturer = enumerator.createCapturer(deviceName, null);
+            VideoCapturer videoCapturer = enumerator.createCapturer(deviceName, /* CameraEventsHandler */null);
 
             if (videoCapturer != null) {
                 return videoCapturer;
@@ -939,30 +1297,758 @@ private @Nullable VideoCapturer createCameraCapturer(CameraEnumerator enumerator
 }
 ```
 
-### 3.1 创建Camera1采集 
+#### 3.1.1 摄像头 Camera1 采集(Camera1Capturer)
+1. 创建 Camera1Enumerator；
+2. 通过 Camera1Enumerator 接口 createCapturer() 创建 Camera1Capturer
 
-摄像头枚举类 Camera1Enumerator 和 Camera2Enumerator 继承于 CameraEnumerator。
-
-#### 3.1.1 创建Camera1枚举(Camera1Enumerator)
 ```java
+// sdk/android/api/org/webrtc/Camera1Enumerator.java
 public Camera1Enumerator(boolean captureToTexture) {
     this.captureToTexture = captureToTexture;
 }
+
+@Override
+public CameraVideoCapturer createCapturer(
+    String deviceName, CameraVideoCapturer.CameraEventsHandler eventsHandler) {
+    return new Camera1Capturer(deviceName, eventsHandler, captureToTexture);
+}
 ```
 
-#### 3.1.2 创建 CameraCapturer
+3. Camera1Capturer 构造函数调用父类 CameraCapturer 构造函数，保存相关参数等操作
 ```java
+// sdk/android/api/org/webrtc/Camera1Capturer.java
+public Camera1Capturer( String cameraName, CameraEventsHandler eventsHandler, boolean captureToTexture) {
+    /* 调用父类构造函数，注意此处重建了 Camera1Enumerator  */
+    super(cameraName, eventsHandler, new Camera1Enumerator(captureToTexture));
 
+    this.captureToTexture = captureToTexture;
+}
+
+// sdk/android/src/java/org/webrt/CameraCapturer.java
+public CameraCapturer(String cameraName, @Nullable CameraEventsHandler eventsHandler,
+      CameraEnumerator cameraEnumerator) {
+    // 此处 eventsHandler 为 null
+    if (eventsHandler == null) {
+        eventsHandler = new CameraEventsHandler() {
+            @Override
+            public void onCameraError(String errorDescription) {}
+            @Override
+            public void onCameraDisconnected() {}
+            @Override
+            public void onCameraFreezed(String errorDescription) {}
+            @Override
+            public void onCameraOpening(String cameraName) {}
+            @Override
+            public void onFirstFrameAvailable() {}
+            @Override
+            public void onCameraClosed() {}
+        };
+    }
+
+    this.eventsHandler = eventsHandler;
+    this.cameraEnumerator = cameraEnumerator;
+    this.cameraName = cameraName;
+    List<String> deviceNames = Arrays.asList(cameraEnumerator.getDeviceNames());
+    uiThreadHandler = new Handler(Looper.getMainLooper());
+}
 ```
 
-### 3.2 创建Camera2采集
-Camera2 必须启用 Texture 才能渲染。
-
-#### 3.2.1 创建 Camera2 枚举(Camera2Enumerator)
+#### 3.1.2 摄像头 Camera2 采集(Camera2Capturer)
+1. 创建 Camera2Enumerator；
+2. 通过 Camera2Enumerator 接口 createCapturer() 创建 Camera2Capturer
 ```java
+// sdk/android/api/org/webrtc/Camera2Enumerator.java
 public Camera2Enumerator(Context context) {
     this.context = context;
     /* 获取系统摄像头管理服务 */
     this.cameraManager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
 }
+
+@Override
+public CameraVideoCapturer createCapturer(String deviceName, CameraVideoCapturer.CameraEventsHandler eventsHandler) {
+    return new Camera2Capturer(context, deviceName, eventsHandler);
+}
+```
+
+3. Camera2Capturer 构造函数调用父类 CameraCapturer 构造函数，保存相关参数等操作
+```java
+// sdk/android/api/org/webrtc/Camera1Capturer.java
+public Camera2Capturer(Context context, String cameraName, CameraEventsHandler eventsHandler) {
+    /* 调用父类构造函数，注意此处新建了 Camera2Enumerator  */
+    super(cameraName, eventsHandler, new Camera2Enumerator(context));
+
+    this.context = context;
+    /* 获取系统摄像头管理服务 */
+    cameraManager = (CameraManager) context.getSystemService(Context.CAMERA_SERVICE);
+}
+
+// sdk/android/src/java/org/webrt/CameraCapturer.java
+public CameraCapturer(String cameraName, @Nullable CameraEventsHandler eventsHandler,
+      CameraEnumerator cameraEnumerator) {
+    // 此处 eventsHandler 为 null
+    if (eventsHandler == null) {
+        eventsHandler = new CameraEventsHandler() {
+            @Override
+            public void onCameraError(String errorDescription) {}
+            @Override
+            public void onCameraDisconnected() {}
+            @Override
+            public void onCameraFreezed(String errorDescription) {}
+            @Override
+            public void onCameraOpening(String cameraName) {}
+            @Override
+            public void onFirstFrameAvailable() {}
+            @Override
+            public void onCameraClosed() {}
+        };
+    }
+
+    this.eventsHandler = eventsHandler;
+    this.cameraEnumerator = cameraEnumerator;
+    this.cameraName = cameraName;
+    List<String> deviceNames = Arrays.asList(cameraEnumerator.getDeviceNames());
+    uiThreadHandler = new Handler(Looper.getMainLooper());
+}
+```
+
+### 3.2 创建 VideoSource
+创建 Java 层 VideoSource，由 PeerConnectionClient.createVideoTrack() 内调用。
+
+```java
+// sdk/android/api/org/webrtc/PeerConnectionFactory.java
+public VideoSource createVideoSource(boolean isScreencast) {
+    return createVideoSource(isScreencast, /* alignTimestamps= */ true);
+}
+
+public VideoSource createVideoSource(boolean isScreencast, boolean alignTimestamps) {
+    checkPeerConnectionFactoryExists();
+    // 需先创建 Native 层 VideoSource，进行绑定
+    return new VideoSource(nativeCreateVideoSource(nativeFactory, isScreencast, alignTimestamps));
+}
+
+// sdk/android/api/org/webrtc/VideoSource.java
+public VideoSource(long nativeSource) {
+    // 调用父类 MediaSource 构造
+    super(nativeSource);
+    // 创建 AndroidVideoTrackSource 的 java 层映射
+    this.nativeAndroidVideoTrackSource = new NativeAndroidVideoTrackSource(nativeSource);
+}
+
+// // sdk/android/src/java/org/webrtc/NativeAndroidVideoTrackSource.java
+public NativeAndroidVideoTrackSource(long nativeAndroidVideoTrackSource) {
+    this.nativeAndroidVideoTrackSource = nativeAndroidVideoTrackSource;
+}
+
+// sdk/android/api/org/webrtc/MediaSource.java
+public MediaSource(long nativeSource) {
+    refCountDelegate = new RefCountDelegate(() -> JniCommon.nativeReleaseRef(nativeSource));
+    this.nativeSource = nativeSource;
+}
+```
+
+创建 VideoSource 对应 Native 层 AndroidVideoTrackSource。
+```c++
+// out/android_arm64_Debug/gen/sdk/android/generated_peerconnection_jni/PeerConnectionFactory_jni.h
+JNI_GENERATOR_EXPORT jlong Java_org_webrtc_PeerConnectionFactory_nativeCreateVideoSource(
+    JNIEnv* env,
+    jclass jcaller,
+    jlong factory,
+    jboolean is_screencast,
+    jboolean alignTimestamps) {
+  return JNI_PeerConnectionFactory_CreateVideoSource(env, factory, is_screencast, alignTimestamps);
+}
+
+// sdk/android/src/jni/pc/peer_connection_factory.cc
+static jlong JNI_PeerConnectionFactory_CreateVideoSource(
+    JNIEnv* jni,
+    jlong native_factory,
+    jboolean is_screencast,
+    jboolean align_timestamps) {
+  OwnedFactoryAndThreads* factory =
+      reinterpret_cast<OwnedFactoryAndThreads*>(native_factory);
+  return jlongFromPointer(CreateVideoSource(jni, factory->signaling_thread(),
+                                            factory->worker_thread(),
+                                            is_screencast, align_timestamps));
+}
+
+// sdk/android/src/jni/pc/video.cc
+void* CreateVideoSource(JNIEnv* env,
+                        rtc::Thread* signaling_thread,
+                        rtc::Thread* worker_thread,
+                        jboolean is_screencast,
+                        jboolean align_timestamps) {
+    rtc::scoped_refptr<AndroidVideoTrackSource> source(
+        new rtc::RefCountedObject<AndroidVideoTrackSource>(
+            signaling_thread, env, is_screencast, align_timestamps));
+    return source.release();
+}
+
+// sdk/android/src/jni/android_video_track_source.cc
+// AndroidVideoTrackSource 继承于 AdaptedVideoTrackSource, AdaptedVideoTrackSource 又继承于 VideoTrackSourceInterface
+// AdaptedVideoTrackSource 实现了对视频裁剪，角度旋转，丢帧等处理
+AndroidVideoTrackSource::AndroidVideoTrackSource(rtc::Thread* signaling_thread,
+                                                 JNIEnv* jni,
+                                                 bool is_screencast,
+                                                 bool align_timestamps)
+    : AdaptedVideoTrackSource(kRequiredResolutionAlignment),
+      signaling_thread_(signaling_thread),
+      is_screencast_(is_screencast),
+      align_timestamps_(align_timestamps) {
+    RTC_LOG(LS_INFO) << "AndroidVideoTrackSource ctor";
+}
+```
+
+### 3.3 摄像头采集初始化及启动
+
+```java
+// sdk/android/src/java/org/webrtc/CameraCapturer.java
+@Override
+public void initialize(SurfaceTextureHelper surfaceTextureHelper, Context applicationContext,
+      org.webrtc.CapturerObserver capturerObserver) {
+    this.applicationContext = applicationContext;
+    // capturerObserver 视频数据回调接口
+    this.capturerObserver = capturerObserver;
+    this.surfaceHelper = surfaceTextureHelper;
+    this.cameraThreadHandler = surfaceTextureHelper.getHandler();
+}
+
+@Override
+public void startCapture(int width, int height, int framerate) {
+    Logging.d(TAG, "startCapture: " + width + "x" + height + "@" + framerate);
+    if (applicationContext == null) {
+        throw new RuntimeException("CameraCapturer must be initialized before calling startCapture.");
+    }
+
+    synchronized (stateLock) {
+        if (sessionOpening || currentSession != null) {
+        Logging.w(TAG, "Session already open");
+        return;
+        }
+
+        this.width = width;
+        this.height = height;
+        this.framerate = framerate;
+
+        sessionOpening = true;
+        // 摄像头启动尝试次数
+        openAttemptsRemaining = MAX_OPEN_CAMERA_ATTEMPTS;
+        createSessionInternal(0);
+    }
+}
+
+private void createSessionInternal(int delayMs) {
+    // 启动摄像头启动超时定时器，以便重启摄像头
+    uiThreadHandler.postDelayed(openCameraTimeoutRunnable, delayMs + OPEN_CAMERA_TIMEOUT);
+    cameraThreadHandler.postDelayed(new Runnable() {
+        @Override
+        public void run() {
+            // 调用子类 Camera1Capturer 或 Camera2Capturer 的 createCameraSession() 实现
+            createCameraSession(createSessionCallback, cameraSessionEventsHandler, applicationContext,
+                surfaceHelper, cameraName, width, height, framerate);
+        }
+    }, delayMs);
+}
+```
+
+#### 3.3.1 启动 Camera1 采集
+在调用 CameraCapturer 的 startCapture() 时启动，先创建 Camera1Session，并在 Camera1Session 内启动摄像头。
+
+1. 创建 Camera1Session，并打开摄像头，设置摄像头参数。
+```java
+// sdk/android/api/org/webrtc/Camera1Capturer.java
+@Override
+protected void createCameraSession(CameraSession.CreateSessionCallback createSessionCallback,
+    CameraSession.Events events, Context applicationContext,
+    SurfaceTextureHelper surfaceTextureHelper, String cameraName, int width, int height,
+    int framerate) {
+    // 创建 Camera1Session 并启动摄像头
+    Camera1Session.create(createSessionCallback, events, captureToTexture, applicationContext,
+        surfaceTextureHelper, Camera1Enumerator.getCameraIndex(cameraName), width, height,
+        framerate);
+}
+
+// sdk/android/src/java/org/webrtc/Camera1Session.java
+public static void create(final CreateSessionCallback callback, final Events events,
+      final boolean captureToTexture, final Context applicationContext,
+      final SurfaceTextureHelper surfaceTextureHelper, final int cameraId, final int width,
+      final int height, final int framerate) {
+    final long constructionTimeNs = System.nanoTime();
+    Logging.d(TAG, "Open camera " + cameraId);
+    // 状态上报
+    events.onCameraOpening();
+
+    final android.hardware.Camera camera;
+    try {
+        // 打开摄像头
+        camera = android.hardware.Camera.open(cameraId);
+    } catch (RuntimeException e) {
+        // 摄像头打开失败，回调触发重启
+        callback.onFailure(FailureType.ERROR, e.getMessage());
+        return;
+    }
+
+    if (camera == null) {
+        // 摄像头打开失败，回调触发重启
+        callback.onFailure(FailureType.ERROR,
+            "android.hardware.Camera.open returned null for camera id = " + cameraId);
+        return;
+    }
+
+    try {
+        // 设置摄像头预览
+        camera.setPreviewTexture(surfaceTextureHelper.getSurfaceTexture());
+    } catch (IOException | RuntimeException e) {
+        camera.release();
+        // 摄像头预览设置失败，回调触发重启
+        callback.onFailure(FailureType.ERROR, e.getMessage());
+        return;
+    }
+
+    // 摄像头 参数设置
+    ...
+
+    // 若以非纹理方式捕捉，则通过 Camera.PreviewCallback 回调采集数据，需设置缓冲区
+    if (!captureToTexture) {
+        final int frameSize = captureFormat.frameSize();
+        for (int i = 0; i < NUMBER_OF_CAPTURE_BUFFERS; ++i) {
+            final ByteBuffer buffer = ByteBuffer.allocateDirect(frameSize);
+            camera.addCallbackBuffer(buffer.array());
+        }
+    }
+
+    // Calculate orientation manually and send it as CVO insted.
+    camera.setDisplayOrientation(0 /* degrees */);
+
+    callback.onDone(new Camera1Session(events, captureToTexture, applicationContext,
+        surfaceTextureHelper, cameraId, camera, info, captureFormat, constructionTimeNs));
+}
+
+private Camera1Session(Events events, boolean captureToTexture, Context applicationContext,
+      SurfaceTextureHelper surfaceTextureHelper, int cameraId, android.hardware.Camera camera,
+      android.hardware.Camera.CameraInfo info, CaptureFormat captureFormat,
+      long constructionTimeNs) {
+    Logging.d(TAG, "Create new camera1 session on camera " + cameraId);
+
+    this.cameraThreadHandler = new Handler();
+    this.events = events;
+    this.captureToTexture = captureToTexture;
+    this.applicationContext = applicationContext;
+    this.surfaceTextureHelper = surfaceTextureHelper;
+    this.cameraId = cameraId;
+    this.camera = camera;
+    this.info = info;
+    this.captureFormat = captureFormat;
+    this.constructionTimeNs = constructionTimeNs;
+
+    // 设置采集数据输出分辨率
+    surfaceTextureHelper.setTextureSize(captureFormat.width, captureFormat.height);
+
+    // 开始摄像头采集
+    startCapturing();
+}
+```
+
+2. 启动摄像头采集，设置视频采集数据回调。
+```java
+// sdk/android/src/java/org/webrtc/Camera1Session.java
+private void startCapturing() {
+    Logging.d(TAG, "Start capturing");
+    checkIsOnCameraThread();
+
+    state = SessionState.RUNNING;
+
+    camera.setErrorCallback(new android.hardware.Camera.ErrorCallback() {
+        @Override
+        public void onError(int error, android.hardware.Camera camera) {
+            String errorMessage;
+            if (error == android.hardware.Camera.CAMERA_ERROR_SERVER_DIED) {
+                errorMessage = "Camera server died!";
+            } else {
+                errorMessage = "Camera error: " + error;
+            }
+            Logging.e(TAG, errorMessage);
+            stopInternal();
+            if (error == android.hardware.Camera.CAMERA_ERROR_EVICTED) {
+                events.onCameraDisconnected(Camera1Session.this);
+            } else {
+                events.onCameraError(Camera1Session.this, errorMessage);
+            }
+        }
+    });
+
+    // 设置采集数据监听
+    if (captureToTexture) {
+        listenForTextureFrames();
+    } else {
+        listenForBytebufferFrames();
+    }
+    try {
+        // 正式启动摄像头
+        camera.startPreview();
+    } catch (RuntimeException e) {
+        stopInternal();
+        events.onCameraError(this, e.getMessage());
+    }
+}
+```
+
+#### 3.3.2 启动 Camera2 采集
+在调用 CameraCapturer 的 startCapture() 时启动，先创建 Camera2Session，并在 Camera2Session 内启动摄像头。
+
+1. 创建 Camera2Session
+```java
+// sdk/android/api/org/webrtc/Camera2Capturer.java
+@Override
+protected void createCameraSession(CameraSession.CreateSessionCallback createSessionCallback,
+      CameraSession.Events events, Context applicationContext,
+      SurfaceTextureHelper surfaceTextureHelper, String cameraName, int width, int height,
+      int framerate) {
+    Camera2Session.create(createSessionCallback, events, applicationContext, cameraManager,
+        surfaceTextureHelper, cameraName, width, height, framerate);
+}
+
+// sdk/android/src/java/org/webrtc/Camera2Session.java
+public static void create(CreateSessionCallback callback, Events events,
+      Context applicationContext, CameraManager cameraManager,
+      SurfaceTextureHelper surfaceTextureHelper, String cameraId, int width, int height,
+      int framerate) {
+    new Camera2Session(callback, events, applicationContext, cameraManager, surfaceTextureHelper,
+        cameraId, width, height, framerate);
+}
+
+private Camera2Session(CreateSessionCallback callback, Events events, Context applicationContext,
+      CameraManager cameraManager, SurfaceTextureHelper surfaceTextureHelper, String cameraId,
+      int width, int height, int framerate) {
+    Logging.d(TAG, "Create new camera2 session on camera " + cameraId);
+
+    constructionTimeNs = System.nanoTime();
+
+    this.cameraThreadHandler = new Handler();
+    this.callback = callback;
+    this.events = events;
+    this.applicationContext = applicationContext;
+    this.cameraManager = cameraManager;
+    this.surfaceTextureHelper = surfaceTextureHelper;
+    this.cameraId = cameraId;
+    this.width = width;
+    this.height = height;
+    this.framerate = framerate;
+
+    start();
+}
+```
+
+2. 打开摄像头
+```java
+private void start() {
+    checkIsOnCameraThread();
+    Logging.d(TAG, "start");
+
+    try {
+        cameraCharacteristics = cameraManager.getCameraCharacteristics(cameraId);
+    } catch (final CameraAccessException e) {
+        reportError("getCameraCharacteristics(): " + e.getMessage());
+        return;
+    }
+    cameraOrientation = cameraCharacteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
+    isCameraFrontFacing = cameraCharacteristics.get(CameraCharacteristics.LENS_FACING)
+        == CameraMetadata.LENS_FACING_FRONT;
+
+    findCaptureFormat();
+    openCamera();
+}
+
+private void openCamera() {
+    checkIsOnCameraThread();
+
+    Logging.d(TAG, "Opening camera " + cameraId);
+    events.onCameraOpening();
+
+    try {
+        // 设置摄像头状态回调，打开摄像头
+        cameraManager.openCamera(cameraId, new CameraStateCallback(), cameraThreadHandler);
+    } catch (CameraAccessException e) {
+        reportError("Failed to open camera: " + e);
+        return;
+    }
+}
+```
+
+### 3.4 创建 VideoTrack
+调用入口为 PeerConnectionClient.createVideoTrack()， 详见 [1.3 创建 VideoTrack](#13-创建-videotrack)。
+在创建 VideoSource 及打开摄像头之后，调用 PeerConnectionFactory.createVideoTrack()。
+
+#### 3.4.1 创建 VideoTrack
+
+localVideoTrack = factory.createVideoTrack(VIDEO_TRACK_ID, videoSource);
+
+```java
+// sdk/android/api/org/webrtc/PeerConnectionFactory.java
+// id: "ARDAMSv0"
+public VideoTrack createVideoTrack(String id, VideoSource source) {
+    checkPeerConnectionFactoryExists();
+    return new VideoTrack(
+        nativeCreateVideoTrack(nativeFactory, id, source.getNativeVideoTrackSource()/* Native VideoSource 指针地址 */));
+}
+
+// sdk/android/api/org/webrtc/VideoTrack.java
+public VideoTrack(long nativeTrack) {
+    // 调用父类 MediaStreamTrack 构造函数，保存 native 指针
+    super(nativeTrack);
+}
+```
+创建 Native 层 VideoTrack
+```c++
+// out/android_arm64_Debug/gen/sdk/android/generated_peerconnection_jni/PeerConnectionFactory_jni.h
+JNI_GENERATOR_EXPORT jlong Java_org_webrtc_PeerConnectionFactory_nativeCreateVideoTrack(
+    JNIEnv* env,
+    jclass jcaller,
+    jlong factory,
+    jstring id,
+    jlong nativeVideoSource) {
+    return JNI_PeerConnectionFactory_CreateVideoTrack(env, factory,
+        base::android::JavaParamRef<jstring>(env, id), nativeVideoSource);
+}
+
+// sdk/android/src/jni/pc/peer_connection_factory.cc
+static jlong JNI_PeerConnectionFactory_CreateVideoTrack(
+    JNIEnv* jni,
+    jlong native_factory,
+    const JavaParamRef<jstring>& id,
+    jlong native_source) {
+    rtc::scoped_refptr<VideoTrackInterface> track =
+        PeerConnectionFactoryFromJava(native_factory)
+            ->CreateVideoTrack(
+                JavaToStdString(jni, id),
+                reinterpret_cast<VideoTrackSourceInterface*>(native_source));
+    return jlongFromPointer(track.release());
+}
+
+// pc/peer_connection_factory.cc
+rtc::scoped_refptr<VideoTrackInterface> PeerConnectionFactory::CreateVideoTrack(
+    const std::string& id,
+    VideoTrackSourceInterface* source) {
+  RTC_DCHECK(signaling_thread_->IsCurrent());
+  rtc::scoped_refptr<VideoTrackInterface> track(
+      VideoTrack::Create(id, source, worker_thread_));
+  return VideoTrackProxy::Create(signaling_thread_, worker_thread_, track);
+}
+
+// pc/video_track.cc
+rtc::scoped_refptr<VideoTrack> VideoTrack::Create(
+    const std::string& id,
+    VideoTrackSourceInterface* source,
+    rtc::Thread* worker_thread) {
+    // 构造 VideoTrack
+    rtc::RefCountedObject<VideoTrack>* track =
+        new rtc::RefCountedObject<VideoTrack>(id, source, worker_thread);
+    return track;
+}
+
+VideoTrack::VideoTrack(const std::string& label,
+                       VideoTrackSourceInterface* video_source,
+                       rtc::Thread* worker_thread)
+    : MediaStreamTrack<VideoTrackInterface>(label),
+      worker_thread_(worker_thread),
+      // 保存 VideoSource，在 set_enabled() 的时候添加 sink。
+      video_source_(video_source),
+      content_hint_(ContentHint::kNone) {
+    
+    // 注册 VideoSource 观察者
+    video_source_->RegisterObserver(this);
+}
+
+// api/notifier.h
+// AndroidVideoTrackSource 继承于 AdaptedVideoTrackSource，
+// AdaptedVideoTraceSource 继承于 webrtc::Notifier<webrtc::VideoTrackSourceInterface>
+virtual void RegisterObserver(ObserverInterface* observer) {
+    RTC_DCHECK(observer != nullptr);
+    observers_.push_back(observer);
+}
+```
+
+#### 3.4.2 使能 VideoTrack
+
+localVideoTrack.setEnabled(renderVideo);
+
+```java
+// sdk/android/api/org/webrtc/MediaStreamTrack.java
+// VideoTrack 是 MediaStreamTrack 的扩展类，setEnabled() 的实现位于 MediaStreamTrack
+public boolean setEnabled(boolean enable) {
+    checkMediaStreamTrackExists();
+    // 调用 Native 层 VideoTrack 函数
+    return nativeSetEnabled(nativeTrack, enable);
+}
+```
+转入 Native 层调用
+```c++
+// out/android_arm64_Debug/gen/sdk/android/generated_peerconnection_jni/MediaStreamTrack_jni.h
+JNI_GENERATOR_EXPORT jboolean Java_org_webrtc_MediaStreamTrack_nativeSetEnabled(
+    JNIEnv* env,
+    jclass jcaller,
+    jlong track,
+    jboolean enabled) {
+  return JNI_MediaStreamTrack_SetEnabled(env, track, enabled);
+}
+
+// sdk/android/src/jni/pc/media_stream_track.cc
+static jboolean JNI_MediaStreamTrack_SetEnabled(JNIEnv* jni,
+                                                jlong j_p,
+                                                jboolean enabled) {
+    return reinterpret_cast<MediaStreamTrackInterface*>(j_p)->set_enabled(enabled);
+}
+
+// pc/video_track.cc
+bool VideoTrack::set_enabled(bool enable) {
+    RTC_DCHECK(signaling_thread_checker_.IsCurrent());
+    worker_thread_->Invoke<void>(RTC_FROM_HERE, [enable, this] {
+        RTC_DCHECK(worker_thread_->IsCurrent());
+        for (auto& sink_pair : sink_pairs()) {
+            rtc::VideoSinkWants modified_wants = sink_pair.wants;
+            modified_wants.black_frames = !enable;
+            video_source_->AddOrUpdateSink(sink_pair.sink, modified_wants);
+        }
+    });
+
+    // 调用基类函数
+    return MediaStreamTrack<VideoTrackInterface>::set_enabled(enable);
+}
+
+// pc/media_stream_track.h
+bool set_enabled(bool enable) override {
+    bool fire_on_change = (enable != enabled_);
+    // 保存使能状态
+    enabled_ = enable;
+    if (fire_on_change) {
+        // 此处 T 为 VideoTrackInterface
+        Notifier<T>::FireOnChanged();
+    }
+    return fire_on_change;
+}
+```
+
+#### 3.4.3 添加渲染 Sink
+添加预览的 VideoSink 到 VideoTrack。
+
+localVideoTrack.addSink(localRender);
+```java
+// sdk/android/api/org/webrtc/VideoTrack.java
+public void addSink(VideoSink sink) {
+    if (sink == null) {
+        throw new IllegalArgumentException("The VideoSink is not allowed to be null");
+    }
+    // We allow calling addSink() with the same sink multiple times. This is similar to the C++
+    // VideoTrack::AddOrUpdateSink().
+    if (!sinks.containsKey(sink)) {
+        /* Java 层 VideoSink 与 Native 层 VideoSink 的映射 */
+        final long nativeSink = nativeWrapSink(sink);
+        /* 保存映射关系，在 删除Sink时，释放 Native 层的 VideoSink */
+        sinks.put(sink, nativeSink);
+        nativeAddSink(getNativeMediaStreamTrack(), nativeSink);
+    }
+}
+```
+
+1. 映射 Java 层 VideoSink 到 Native 层 VideoSink（VideoSinkWrapper）。
+```c++
+// out/android_arm64_Debug/gen/sdk/android/generated_video_jni/VideoTrack_jni.h
+JNI_GENERATOR_EXPORT jlong Java_org_webrtc_VideoTrack_nativeWrapSink(
+    JNIEnv* env,
+    jclass jcaller,
+    jobject sink) {
+    return JNI_VideoTrack_WrapSink(env, base::android::JavaParamRef<jobject>(env, sink));
+}
+
+// sdk/android/src/jni/video_track.cc
+static jlong JNI_VideoTrack_WrapSink(JNIEnv* jni,
+                                     const JavaParamRef<jobject>& sink) {
+  return jlongFromPointer(new VideoSinkWrapper(jni, sink));
+}
+
+// sdk/android/src/jni/video_sink.cc
+// 保存 Java 层 VideoSink 实例，后续视频帧通过该实例回调给 Java 层。
+// VideoSinkWrapper 父类是 rtc::VideoSinkInterface<VideoFrame>，重写了 OnFrame(VideoFrame)
+VideoSinkWrapper::VideoSinkWrapper(JNIEnv* jni, const JavaRef<jobject>& j_sink)
+    : j_sink_(jni, j_sink) {}
+```
+
+2. 添加 VideoSink 到 VideoTrack 上
+```c++
+// out/android_arm64_Debug/gen/sdk/android/generated_video_jni/VideoTrack_jni.h
+JNI_GENERATOR_EXPORT void Java_org_webrtc_VideoTrack_nativeAddSink(
+    JNIEnv* env,
+    jclass jcaller,
+    jlong track,
+    jlong nativeSink) {
+    return JNI_VideoTrack_AddSink(env, track, nativeSink);
+}
+
+// sdk/android/src/jni/video_track.cc
+static void JNI_VideoTrack_AddSink(JNIEnv* jni,
+                                   jlong j_native_track,
+                                   jlong j_native_sink) {
+    reinterpret_cast<VideoTrackInterface*>(j_native_track)
+        ->AddOrUpdateSink(
+            reinterpret_cast<rtc::VideoSinkInterface<VideoFrame>*>(j_native_sink),
+            rtc::VideoSinkWants());
+}
+
+// pc/video_track.cc
+void VideoTrack::AddOrUpdateSink(rtc::VideoSinkInterface<VideoFrame>* sink,
+                                 const rtc::VideoSinkWants& wants) {
+    RTC_DCHECK(worker_thread_->IsCurrent());
+    /* 基类保存 Sink */
+    VideoSourceBase::AddOrUpdateSink(sink, wants);
+    rtc::VideoSinkWants modified_wants = wants;
+
+    // 是否已使能 VideoTrack，未使能的话用黑屏帧代替，因之前已设置 enable，所以此处 black_frames 为false
+    modified_wants.black_frames = !enabled();
+    // VideoSource 添加回调 Sink，即调用 AdaptedVideoTrackSource::AddOrUpdateSink(）
+    video_source_->AddOrUpdateSink(sink, modified_wants);
+}
+
+// media/base/video_source_base.cc
+void VideoSourceBase::AddOrUpdateSink(
+    VideoSinkInterface<webrtc::VideoFrame>* sink,
+    const VideoSinkWants& wants) {
+    RTC_DCHECK(sink != nullptr);
+
+    SinkPair* sink_pair = FindSinkPair(sink);
+    if (!sink_pair) {
+        sinks_.push_back(SinkPair(sink, wants));
+    } else {
+        sink_pair->wants = wants;
+    }
+}
+
+// 添加 VideoSink 到 VideoSource
+// AndroidVideoTrackSource 继承于 AdaptedVideoTrackSource,
+void AdaptedVideoTrackSource::AddOrUpdateSink(
+    rtc::VideoSinkInterface<webrtc::VideoFrame>* sink,
+    const rtc::VideoSinkWants& wants) {
+    broadcaster_.AddOrUpdateSink(sink, wants);
+    OnSinkWantsChanged(broadcaster_.wants());
+}
+```
+
+#### 3.4.4 添加 VideoTrack
+添加 VideoTrack 到 PeerConnection
+
+```java
+
+```
+
+### 3.5 摄像头视频数据流
+```
+(Camera2 或 Camera1 使能 captureToTexture) (SurfaceTextureHelper.java) SurfaceTextureHelper.listener.onFrame() -->
+Camera1Session/Camera2Session --> (CameraCapturer.java) CameraSession.Events.onFrameCaptured() 
+--> (VideoSource.java) CapturerObserver.onFrameCaptured()
+--> (NativeAndroidVideoTrackSource.java) NativeAndroidVideoTrackSource.onFrameCaptured() 
+--> (android_video_track_source.cc) AndroidVideoTrackSource.onFrameCaptured()
+--> (adapted_video_track_source.cc) AdaptedVideoTrackSource::OnFrame() --> broadcaster_.OnFrame(frame)
+// 视频预览
+--> (sdk/android/src/jni/video_sink.cc) VideoSinkWrapper::::OnFrame(VideoFrame)
+--> (gen/sdk/android/generated_video_jni/VideoSink_jni.h) Java_VideoSink_onFrame(VideoFrame) // 映射到 Java 层 VideoFrame
+--> (CallActivity.java) ProxyVideoSink::onFrame() --> target.onFrame(VideoFrame)
+--> (SurfaceViewRenderer.java) SurfaceViewRenderer::onFrame(VideoFrame)
 ```
