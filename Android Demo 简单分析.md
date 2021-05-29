@@ -458,6 +458,8 @@ private void createPeerConnectionInternal() {
             remoteVideoTrack.addSink(remoteSink);
         }
     }
+
+    // 创建并添加音频源 AudioTrack 到 PeerConnection
     peerConnection.addTrack(createAudioTrack(), mediaStreamLabels);
     if (isVideoCallEnabled()) {
         findVideoSender();
@@ -670,6 +672,145 @@ private SurfaceTextureHelper(Context sharedContext, Handler handler, boolean ali
         hasPendingTexture = true;
         tryDeliverTextureFrame();
     }, handler);
+}
+```
+
+### 1.4 添加 VideoTrack
+添加视频 VideoTrack 到 PeerConnection。
+peerConnection.addTrack(createVideoTrack(videoCapturer), mediaStreamLabels);
+
+简要代码流程：
+```java
+// sdk/android/api/org/webrtc/PeerConnection.java
+public RtpSender addTrack(MediaStreamTrack track) {
+    return addTrack(track, Collections.emptyList());
+}
+
+public RtpSender addTrack(MediaStreamTrack track, List<String> streamIds) {
+    if (track == null || streamIds == null) {
+        throw new NullPointerException("No MediaStreamTrack specified in addTrack.");
+    }
+
+    // JNI 调用
+    RtpSender newSender = nativeAddTrack(track.getNativeMediaStreamTrack(), streamIds);
+    if (newSender == null) {
+        throw new IllegalStateException("C++ addTrack failed.");
+    }
+    senders.add(newSender);
+    return newSender;
+}
+
+// sdk/android/api/org/webrtc/RtpSender.java
+// 从 C++ 层构造
+@CalledByNative
+public RtpSender(long nativeRtpSender) {
+    this.nativeRtpSender = nativeRtpSender;
+    long nativeTrack = nativeGetTrack(nativeRtpSender);
+    // Java 层最终保存 VideoTrack 或 AudioTrack 的地方
+    cachedTrack = MediaStreamTrack.createMediaStreamTrack(nativeTrack);
+
+    long nativeDtmfSender = nativeGetDtmfSender(nativeRtpSender);
+    dtmfSender = (nativeDtmfSender != 0) ? new DtmfSender(nativeDtmfSender) : null;
+}
+```
+
+C++ 层调用
+```C++
+// out/android_arm64_Debug/gen/sdk/android/generated_peerconnection_jni/PeerConnection_jni.h
+JNI_GENERATOR_EXPORT jobject Java_org_webrtc_PeerConnection_nativeAddTrack(
+    JNIEnv* env,
+    jobject jcaller,
+    jlong track,
+    jobject streamIds) {
+    return JNI_PeerConnection_AddTrack(env, base::android::JavaParamRef<jobject>(env, jcaller), track,
+        base::android::JavaParamRef<jobject>(env, streamIds)).Release();
+}
+
+// sdk/android/src/jni/pc/peer_connection.cc
+static ScopedJavaLocalRef<jobject> JNI_PeerConnection_AddTrack(
+    JNIEnv* jni,
+    const JavaParamRef<jobject>& j_pc,
+    const jlong native_track,
+    const JavaParamRef<jobject>& j_stream_labels) {
+    // 在此转入平台统一调用接口
+    RTCErrorOr<rtc::scoped_refptr<RtpSenderInterface>> result =
+        ExtractNativePC(jni, j_pc)->AddTrack(
+            reinterpret_cast<MediaStreamTrackInterface*>(native_track),
+            JavaListToNativeVector<std::string, jstring>(jni, j_stream_labels,
+                                                        &JavaToNativeString));
+    if (!result.ok()) {
+        RTC_LOG(LS_ERROR) << "Failed to add track: " << result.error().message();
+        return nullptr;
+    } else {
+        // 创建 Java 层 RtpSender
+        return NativeToJavaRtpSender(jni, result.MoveValue());
+    }
+}
+
+// pc/peer_connection.cc
+RTCErrorOr<rtc::scoped_refptr<RtpSenderInterface>> PeerConnection::AddTrack(
+    rtc::scoped_refptr<MediaStreamTrackInterface> track,
+    const std::vector<std::string>& stream_ids) {
+    RTC_DCHECK_RUN_ON(signaling_thread());
+    TRACE_EVENT0("webrtc", "PeerConnection::AddTrack");
+    if (!track) {
+        LOG_AND_RETURN_ERROR(RTCErrorType::INVALID_PARAMETER, "Track is null.");
+    }
+    if (!(track->kind() == MediaStreamTrackInterface::kAudioKind ||
+            track->kind() == MediaStreamTrackInterface::kVideoKind)) {
+        LOG_AND_RETURN_ERROR(RTCErrorType::INVALID_PARAMETER,
+                            "Track has invalid kind: " + track->kind());
+    }
+    if (IsClosed()) {
+        LOG_AND_RETURN_ERROR(RTCErrorType::INVALID_STATE,
+                            "PeerConnection is closed.");
+    }
+    if (FindSenderForTrack(track)) {
+        LOG_AND_RETURN_ERROR(
+            RTCErrorType::INVALID_PARAMETER,
+            "Sender already exists for track " + track->id() + ".");
+    }
+    auto sender_or_error =
+        (IsUnifiedPlan() ? AddTrackUnifiedPlan(track, stream_ids)
+                        : AddTrackPlanB(track, stream_ids));
+    if (sender_or_error.ok()) {
+        UpdateNegotiationNeeded();
+        stats_->AddTrack(track);
+    }
+    return sender_or_error;
+}
+
+// sdk/android/src/jni/pc/rtp_sender.cc
+ScopedJavaLocalRef<jobject> NativeToJavaRtpSender(
+    JNIEnv* env,
+    rtc::scoped_refptr<RtpSenderInterface> sender) {
+    if (!sender)
+        return nullptr;
+    // Sender is now owned by the Java object, and will be freed from
+    // RtpSender.dispose(), called by PeerConnection.dispose() or getSenders().
+    return Java_RtpSender_Constructor(env, jlongFromPointer(sender.release()));
+}
+
+// out/android_arm64_Debug/gen/sdk/android/generated_peerconnection_jni/RtpSender_jni.h
+static base::android::ScopedJavaLocalRef<jobject> Java_RtpSender_Constructor(JNIEnv* env, jlong
+    nativeRtpSender) {
+    jclass clazz = org_webrtc_RtpSender_clazz(env);
+    CHECK_CLAZZ(env, clazz,
+        org_webrtc_RtpSender_clazz(env), NULL);
+
+    jni_generator::JniJavaCallContextChecked call_context;
+    call_context.Init<
+        base::android::MethodID::TYPE_INSTANCE>(
+            env,
+            clazz,
+            "<init>",
+            "(J)V",
+            &g_org_webrtc_RtpSender_Constructor);
+
+    jobject ret =
+        env->NewObject(clazz,
+            call_context.base.method_id, nativeRtpSender);
+    return base::android::ScopedJavaLocalRef<jobject>(env, ret);
 }
 ```
 
@@ -1412,8 +1553,66 @@ public CameraCapturer(String cameraName, @Nullable CameraEventsHandler eventsHan
 ```
 
 ### 3.2 创建 VideoSource
-创建 Java 层 VideoSource，由 PeerConnectionClient.createVideoTrack() 内调用。
+1. 创建 Java 层 VideoSource，由 PeerConnectionClient.createVideoTrack() 内调用。
 
+```puml
+@startuml
+class MediaSource {
+    + MediaSource(long nativeSource)
+    ..
+    + State state()
+    ..
+    + void dispose()
+    ..
+    + long getNativeMediaSource()
+}
+note right of MediaSource: Java wrapper for a C++ MediaSourceInterface
+
+class NativeAndroidVideoTrackSource {
+    + NativeAndroidVideoTrackSource(long nativeAndroidVideoTrackSource)
+    ..
+    + void setState(boolean isLive)
+    ..
+    + VideoProcessor.FrameAdaptationParameters adaptFrame(VideoFrame frame)
+    ..
+    + void onFrameCaptured(VideoFrame frame)
+    ..
+    + void adaptOutputFormat(...)
+    ..
+    + void setIsScreencast(boolean isScreencast)
+    ..
+    - void nativeSetIsScreencast(...)
+}
+note left of NativeAndroidVideoTrackSource: a simple layer that only handles the JNI wrapping of a C++
+
+class VideoSource {
+    + VideoSource(long nativeSource)
+    ..
+    + void adaptOutputFormat(int width, int height, int fps)
+    ..
+    + void setIsScreencast(boolean isScreencast)
+    ..
+    + void setVideoProcessor(@Nullable VideoProcessor newVideoProcessor)
+    ..
+    + CapturerObserver getCapturerObserver()
+    ..
+    + long getNativeVideoTrackSource()
+    ..
+    + void dispose()
+    --field--
+    - {field} NativeAndroidVideoTrackSource nativeAndroidVideoTrackSource
+    ..
+    - {field} CapturerObserver capturerObserver
+}
+note right of VideoSource: Java wrapper of native AndroidVideoTrackSource
+
+MediaSource <|-- VideoSource
+VideoSource::nativeAndroidVideoTrackSource *-- NativeAndroidVideoTrackSource
+@enduml
+```
+<center> Java 层 VideoSource 类图 </center>
+
+简要代码流程：
 ```java
 // sdk/android/api/org/webrtc/PeerConnectionFactory.java
 public VideoSource createVideoSource(boolean isScreencast) {
@@ -1446,7 +1645,96 @@ public MediaSource(long nativeSource) {
 }
 ```
 
-创建 VideoSource 对应 Native 层 AndroidVideoTrackSource。
+2. 创建 VideoSource 对应 C++ 层 AndroidVideoTrackSource。
+```puml
+@startuml
+abstract class RefCountInterface {
+    + {abstract} void AddRef()
+    ..
+    + {abstract} RefCountReleaseStatus Release()
+}
+
+abstract class NotifierInterface {
+    + {abstract} void RegisterObserver(ObserverInterface* observer)
+    ..
+    + {abstract} void UnregisterObserver(ObserverInterface* observer)
+}
+
+abstract class MediaSourceInterface {
+    + {abstract} SourceState state()
+    + {abstract} bool remote()
+}
+
+NotifierInterface <|-- MediaSourceInterface
+RefCountInterface <|-- MediaSourceInterface
+
+abstract class VideoSourceInterface <<VideoFrame>> {
+    + {abstract} void AddOrUpdateSink(VideoSinkInterface<VideoFrameT>* sink, 
+    const VideoSinkWants& wants)
+    ..
+    + {abstract} void RemoveSink(VideoSinkInterface<VideoFrameT>* sink)
+}
+
+abstract class VideoTrackSourceInterface {
+    + {abstract} bool is_screencast()
+    ..
+    + {abstract} bool needs_denoising()
+    ..
+    + {abstract} bool SupportsEncodedOutput()
+    ..
+    + {abstract} void GenerateKeyFrame()
+    ..
+    + {abstract} void AddEncodedSink(
+      rtc::VideoSinkInterface<RecordableEncodedFrame>* sink)
+    ..
+    + {abstract} void RemoveEncodedSink(
+      rtc::VideoSinkInterface<RecordableEncodedFrame>* sink)
+}
+
+MediaSourceInterface <|-- VideoTrackSourceInterface
+VideoSourceInterface <|-- VideoTrackSourceInterface
+
+class AdaptedVideoTrackSource {
+    # AdaptedVideoTrackSource(int required_alignment)
+    ..
+    # void OnFrame(const webrtc::VideoFrame& frame)
+    ..
+    # bool AdaptFrame(...)
+    ..
+    # bool apply_rotation()
+    ..
+    # cricket::VideoAdapter* video_adapter()
+    --field--
+    - {field} cricket::VideoAdapter video_adapter_
+    ..
+    - {field} VideoBroadcaster broadcaster_
+}
+VideoTrackSourceInterface <|-- AdaptedVideoTrackSource
+
+class AndroidVideoTrackSource {
+    + void SetState(SourceState state)
+    ..
+    + ScopedJavaLocalRef<jobject> AdaptFrame(...)
+    ..
+    + void OnFrameCaptured(...)
+    ..
+    + void SetIsScreencast(JNIEnv* env, jboolean j_is_screencast)
+    --field--
+    - {field} std::atomic<SourceState> state_
+    ..
+    - {field} std::atomic<bool> is_screencast_
+    ..
+    - {field} rtc::TimestampAligner timestamp_aligner_
+    ..
+    - {field} bool align_timestamps_
+}
+AdaptedVideoTrackSource <|-- AndroidVideoTrackSource
+
+@enduml
+```
+<center> C++ 层 VideoSource 类图 </center>
+
+简要代码流程：
 ```c++
 // out/android_arm64_Debug/gen/sdk/android/generated_peerconnection_jni/PeerConnectionFactory_jni.h
 JNI_GENERATOR_EXPORT jlong Java_org_webrtc_PeerConnectionFactory_nativeCreateVideoSource(
@@ -1782,6 +2070,48 @@ private void openCamera() {
 
 localVideoTrack = factory.createVideoTrack(VIDEO_TRACK_ID, videoSource);
 
+```puml
+@startuml
+
+class MediaStreamTrack {
+    + MediaStreamTrack(long nativeTrack)
+    ..
+    + boolean setEnabled(boolean enable)
+    ..
+    + void dispose()
+    ..
+    + long getNativeMediaStreamTrack()
+    ..
+    + String kind()
+}
+
+note right of MediaStreamTrack : Java wrapper for a C++ MediaStreamTrackInterface
+
+class VideoTrack {
+    + VideoTrack(long nativeTrack)
+    ..
+    + void addSink(VideoSink sink)
+    ..
+    + void removeSink(VideoSink sink)
+    ..
+    + long getNativeVideoTrack()
+    ..
+    - long nativeWrapSink(VideoSink sink)
+    ..
+    - void nativeFreeSink(long sink)
+    ..
+    - {field} IdentityHashMap<VideoSink, Long> sinks
+}
+note right of VideoTrack: Java version of VideoTrackInterface
+
+MediaStreamTrack <|-- VideoTrack
+
+note "Java 层 VideoTrack 类图" as N1
+@enduml
+```
+<center>Java 层 VideoTrack 类图</center>
+
+创建流程分析：
 ```java
 // sdk/android/api/org/webrtc/PeerConnectionFactory.java
 // id: "ARDAMSv0"
@@ -1797,7 +2127,118 @@ public VideoTrack(long nativeTrack) {
     super(nativeTrack);
 }
 ```
-创建 Native 层 VideoTrack
+
+创建 Native 层 VideoTrack。
+```puml
+abstract class RefCountInterface {
+    + {abstract} void AddRef()
+    ..
+    + {abstract} RefCountReleaseStatus Release()
+}
+
+abstract class NotifierInterface {
+    + {abstract} void RegisterObserver(ObserverInterface* observer)
+    ..
+    + {abstract} void UnregisterObserver(ObserverInterface* observer)
+}
+
+abstract class ObserverInterface {
+    + {abstract} void OnChanged()
+}
+
+abstract class MediaStreamTrackInterface {
+    + {abstract} std::string kind()
+    ..
+    + {abstract} bool set_enabled(bool enable)
+    ..
+    + {abstract} bool enabled()
+    ..
+    + {abstract} TrackState state()
+}
+
+RefCountInterface <|-- MediaStreamTrackInterface
+NotifierInterface <|-- MediaStreamTrackInterface
+
+abstract class VideoSourceInterface<<VideoFrame>> {
+    + {abstract} void AddOrUpdateSink(VideoSinkInterface<VideoFrameT>* sink,
+    const VideoSinkWants& wants)
+    ..
+    + {abstract} void RemoveSink(VideoSinkInterface<VideoFrameT>* sink)
+}
+
+class VideoTrackInterface {
+    + VideoTrackSourceInterface* GetSource()
+    ..
+    + void set_content_hint(ContentHint hint)
+    ..
+    + ContentHint content_hint()
+}
+
+MediaStreamTrackInterface <|-- VideoTrackInterface
+VideoSourceInterface <|-- VideoTrackInterface
+
+class Notifier <<VideoTrackInterface>> {
+    + void RegisterObserver(ObserverInterface* observer)
+    ..
+    + void UnregisterObserver(ObserverInterface* observer)
+    ..
+    + void FireOnChanged()
+    -- field --
+    # {field} std::list<ObserverInterface*> observers_
+}
+
+class MediaStreamTrack {
+    + MediaStreamTrackInterface::TrackState state()
+    ..
+    + bool enabled()
+    ..
+    + bool set_enabled(bool enable)
+    ..
+    # bool set_state(MediaStreamTrackInterface::TrackState new_state)
+    --field--
+    - {field} bool enabled_
+    - {field} std::string id_;
+    - {field} MediaStreamTrackInterface::TrackState state_
+}
+VideoTrackInterface <|-- Notifier
+Notifier <|-- MediaStreamTrack
+
+class VideoSourceBase {
+    # SinkPair* FindSinkPair(const VideoSinkInterface<webrtc::VideoFrame>* sink)
+    --field--
+    - {field} std::vector<SinkPair> sinks_
+}
+VideoSourceInterface <|-- VideoSourceBase
+
+class VideoTrack {
+    + {static} static rtc::scoped_refptr<VideoTrack> Create(...)
+    ..
+    + void AddOrUpdateSink(rtc::VideoSinkInterface<VideoFrame>* sink,
+                       const rtc::VideoSinkWants& wants)
+    ..
+    + void RemoveSink(rtc::VideoSinkInterface<VideoFrame>* sink)
+    ..
+    + VideoTrackSourceInterface* GetSource()
+    ..
+    + ContentHint content_hint()
+    ..
+    + void set_content_hint(ContentHint hint)
+    ..
+    + bool set_enabled(bool enable)
+    ..
+    + std::string kind()
+    ..
+    - OnChanged()
+    --field--
+    rtc::scoped_refptr<VideoTrackSourceInterface> video_source_
+}
+MediaStreamTrack <|-- VideoTrack
+VideoSourceBase <|-- VideoTrack
+ObserverInterface <|-- VideoTrack
+```
+<center>C++ 层 VideoTrack 类图</center>
+
+创建流程分析：
 ```c++
 // out/android_arm64_Debug/gen/sdk/android/generated_peerconnection_jni/PeerConnectionFactory_jni.h
 JNI_GENERATOR_EXPORT jlong Java_org_webrtc_PeerConnectionFactory_nativeCreateVideoTrack(
@@ -2029,13 +2470,6 @@ void AdaptedVideoTrackSource::AddOrUpdateSink(
     broadcaster_.AddOrUpdateSink(sink, wants);
     OnSinkWantsChanged(broadcaster_.wants());
 }
-```
-
-#### 3.4.4 添加 VideoTrack
-添加 VideoTrack 到 PeerConnection
-
-```java
-
 ```
 
 ### 3.5 摄像头视频数据流
