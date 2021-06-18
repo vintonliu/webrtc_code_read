@@ -430,6 +430,7 @@ private void createPeerConnectionInternal() {
     rtcConfig.keyType = PeerConnection.KeyType.ECDSA;
     // Enable DTLS for normal calls and disable for loopback calls.
     rtcConfig.enableDtlsSrtp = !peerConnectionParameters.loopback;
+    /* Sdp 语法使用 Unified Plan 模式 */
     rtcConfig.sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN;
 
     /* 创建 PeerConnection */
@@ -677,9 +678,11 @@ private SurfaceTextureHelper(Context sharedContext, Handler handler, boolean ali
 
 ### 1.4 添加 VideoTrack
 添加视频 VideoTrack 到 PeerConnection。
-peerConnection.addTrack(createVideoTrack(videoCapturer), mediaStreamLabels);
+在此流程，会创建RtpSender 及 RtpReceiver 和收发器 RtpTransceiver。
+
 
 简要代码流程：
+peerConnection.addTrack(createVideoTrack(videoCapturer), mediaStreamLabels);
 ```java
 // sdk/android/api/org/webrtc/PeerConnection.java
 public RtpSender addTrack(MediaStreamTrack track) {
@@ -751,25 +754,11 @@ static ScopedJavaLocalRef<jobject> JNI_PeerConnection_AddTrack(
 RTCErrorOr<rtc::scoped_refptr<RtpSenderInterface>> PeerConnection::AddTrack(
     rtc::scoped_refptr<MediaStreamTrackInterface> track,
     const std::vector<std::string>& stream_ids) {
-    RTC_DCHECK_RUN_ON(signaling_thread());
-    TRACE_EVENT0("webrtc", "PeerConnection::AddTrack");
-    if (!track) {
-        LOG_AND_RETURN_ERROR(RTCErrorType::INVALID_PARAMETER, "Track is null.");
-    }
-    if (!(track->kind() == MediaStreamTrackInterface::kAudioKind ||
-            track->kind() == MediaStreamTrackInterface::kVideoKind)) {
-        LOG_AND_RETURN_ERROR(RTCErrorType::INVALID_PARAMETER,
-                            "Track has invalid kind: " + track->kind());
-    }
-    if (IsClosed()) {
-        LOG_AND_RETURN_ERROR(RTCErrorType::INVALID_STATE,
-                            "PeerConnection is closed.");
-    }
-    if (FindSenderForTrack(track)) {
-        LOG_AND_RETURN_ERROR(
-            RTCErrorType::INVALID_PARAMETER,
-            "Sender already exists for track " + track->id() + ".");
-    }
+    
+    ...
+
+    /* 如果是 UnifiedPlan，会创建收发器 Transceiver，包括发送和接收。
+     * 这样可以不用管是否已创建远端流，提前将远端渲染的sink 添加到收发器里面的接收 Track（Android 是这样做的） */
     auto sender_or_error =
         (IsUnifiedPlan() ? AddTrackUnifiedPlan(track, stream_ids)
                         : AddTrackPlanB(track, stream_ids));
@@ -780,7 +769,125 @@ RTCErrorOr<rtc::scoped_refptr<RtpSenderInterface>> PeerConnection::AddTrack(
     return sender_or_error;
 }
 
+/* Unified Plan 模式创建 RtpSender，若无收发器则创建收发器 Transeiver及 VideoRtpReceiver */
+RTCErrorOr<rtc::scoped_refptr<RtpSenderInterface>>
+PeerConnection::AddTrackUnifiedPlan(
+    rtc::scoped_refptr<MediaStreamTrackInterface> track,
+    const std::vector<std::string>& stream_ids) {
+  /* 查找未设置 Track 且收发器 MediaType 与 track 相同，并且不处于发送模式(sendonly,sendrecv)及未stop 的收发器 */
+  auto transceiver = FindFirstTransceiverForAddedTrack(track);
+  if (transceiver) { // 已存在收发器
+    ...
+
+  } else {
+    /* 不存在收发器 */
+    cricket::MediaType media_type =
+        (track->kind() == MediaStreamTrackInterface::kAudioKind
+             ? cricket::MEDIA_TYPE_AUDIO
+             : cricket::MEDIA_TYPE_VIDEO);
+    RTC_LOG(LS_INFO) << "Adding " << cricket::MediaTypeToString(media_type)
+                     << " transceiver in response to a call to AddTrack.";
+    std::string sender_id = track->id();
+    // Avoid creating a sender with an existing ID by generating a random ID.
+    // This can happen if this is the second time AddTrack has created a sender
+    // for this track.
+    if (FindSenderById(sender_id)) {
+      sender_id = rtc::CreateRandomUuid();
+    }
+    /* 创建 RtpSender, 音频为 AudioRtpSender，视频为 VideoRtpSender，设置 Track，在调用 RtpSender::SetSend() 时会将编码的Sink(视频为VideoStreamEncoder) 添加到 track 内，最终也是添加到对应的 VideoSource/AudioSource 里面 */
+    auto sender = CreateSender(media_type, sender_id, track, stream_ids, {});
+    /* 创建 RtpReceiver, 音频为 AudioRtpReceiver，视频为 VideoRtpReceiver，receiver_id 为随机产生 */
+    auto receiver = CreateReceiver(media_type, rtc::CreateRandomUuid());
+    /* 创建收发器 Transceiver */
+    transceiver = CreateAndAddTransceiver(sender, receiver);
+    /* 标记收发器创建原因 */
+    transceiver->internal()->set_created_by_addtrack(true);
+    /* 设置收发器收发模式 */
+    transceiver->internal()->set_direction(RtpTransceiverDirection::kSendRecv);
+  }
+  return transceiver->sender();
+}
+
+/* 创建 RtpSender */
+rtc::scoped_refptr<RtpSenderProxyWithInternal<RtpSenderInternal>>
+PeerConnection::CreateSender(
+    cricket::MediaType media_type,
+    const std::string& id,
+    rtc::scoped_refptr<MediaStreamTrackInterface> track,
+    const std::vector<std::string>& stream_ids,
+    const std::vector<RtpEncodingParameters>& send_encodings) {
+  RTC_DCHECK_RUN_ON(signaling_thread());
+  rtc::scoped_refptr<RtpSenderProxyWithInternal<RtpSenderInternal>> sender;
+  if (media_type == cricket::MEDIA_TYPE_AUDIO) {
+    /* 创建音频 AudioRtpSender */
+    sender = RtpSenderProxyWithInternal<RtpSenderInternal>::Create(
+        signaling_thread(),
+        AudioRtpSender::Create(worker_thread(), id, stats_.get(), this));
+    NoteUsageEvent(UsageEvent::AUDIO_ADDED);
+  } else {
+    /* 创建视频 VideoRtpSender */
+    sender = RtpSenderProxyWithInternal<RtpSenderInternal>::Create(
+        signaling_thread(), VideoRtpSender::Create(worker_thread(), id, this));
+    NoteUsageEvent(UsageEvent::VIDEO_ADDED);
+  }
+  /* 设置 VideoTrack 或 AudioTrack，在此暂时不会将 Encoder Sink 添加到 track，因为还不存在 ssrc */
+  bool set_track_succeeded = sender->SetTrack(track);
+  
+  ...
+
+  return sender;
+}
+
+/* 创建 RtpReceiver */
+rtc::scoped_refptr<RtpReceiverProxyWithInternal<RtpReceiverInternal>>
+PeerConnection::CreateReceiver(cricket::MediaType media_type,
+                               const std::string& receiver_id) {
+  rtc::scoped_refptr<RtpReceiverProxyWithInternal<RtpReceiverInternal>>
+      receiver;
+  if (media_type == cricket::MEDIA_TYPE_AUDIO) {
+    /* 创建音频 AudioRtpReceiver */
+    receiver = RtpReceiverProxyWithInternal<RtpReceiverInternal>::Create(
+        signaling_thread(), new AudioRtpReceiver(worker_thread(), receiver_id,
+                                                 std::vector<std::string>({})));
+    NoteUsageEvent(UsageEvent::AUDIO_ADDED);
+  } else {
+    /* 创建音频 VideoRtpReceiver */
+    receiver = RtpReceiverProxyWithInternal<RtpReceiverInternal>::Create(
+        signaling_thread(), new VideoRtpReceiver(worker_thread(), receiver_id,
+                                                 std::vector<std::string>({})));
+    NoteUsageEvent(UsageEvent::VIDEO_ADDED);
+  }
+  return receiver;
+}
+
+/* 创建收发器 */
+rtc::scoped_refptr<RtpTransceiverProxyWithInternal<RtpTransceiver>>
+PeerConnection::CreateAndAddTransceiver(
+    rtc::scoped_refptr<RtpSenderProxyWithInternal<RtpSenderInternal>> sender,
+    rtc::scoped_refptr<RtpReceiverProxyWithInternal<RtpReceiverInternal>>
+        receiver) {
+  // Ensure that the new sender does not have an ID that is already in use by
+  // another sender.
+  // Allow receiver IDs to conflict since those come from remote SDP (which
+  // could be invalid, but should not cause a crash).
+  RTC_DCHECK(!FindSenderById(sender->id()));
+  auto transceiver = RtpTransceiverProxyWithInternal<RtpTransceiver>::Create(
+      signaling_thread(),
+      new RtpTransceiver(
+          sender, receiver, channel_manager(),
+          sender->media_type() == cricket::MEDIA_TYPE_AUDIO
+              ? channel_manager()->GetSupportedAudioRtpHeaderExtensions()
+              : channel_manager()->GetSupportedVideoRtpHeaderExtensions()));
+  /* 保存收发器 */
+  transceivers_.push_back(transceiver);
+  /* 信号连接 */
+  transceiver->internal()->SignalNegotiationNeeded.connect(
+      this, &PeerConnection::OnNegotiationNeeded);
+  return transceiver;
+}
+
 // sdk/android/src/jni/pc/rtp_sender.cc
+// Native 层创建 Java 层 RtpSender 实例
 ScopedJavaLocalRef<jobject> NativeToJavaRtpSender(
     JNIEnv* env,
     rtc::scoped_refptr<RtpSenderInterface> sender) {
@@ -2472,6 +2579,705 @@ void AdaptedVideoTrackSource::AddOrUpdateSink(
 }
 ```
 
+#### 3.4.4 添加视频编码 Sink
+1. 创建本地 Offer Sdp；
+```java
+// CallActivity.java
+peerConnectionClient.createOffer();
+```
+
+2. 设置本地 Offer Sdp，会逐步创建 VideoMediaChannel, VideoSendStream, 添加 VideoStreamEncoder 到 VideoSource;
+
+```java
+// PeerConnectionClient.java
+// 设置本地 Offer Sdp 是在创建 Offer 成功的回调里面:
+private class SDPObserver implements SdpObserver {
+    @Override
+    public void onCreateSuccess(final SessionDescription origSdp) {
+      if (localSdp != null) {
+        reportError("Multiple SDP create.");
+        return;
+      }
+      String sdpDescription = origSdp.description;
+      if (preferIsac) {
+        sdpDescription = preferCodec(sdpDescription, AUDIO_CODEC_ISAC, true);
+      }
+      if (isVideoCallEnabled()) {
+        sdpDescription =
+            preferCodec(sdpDescription, getSdpVideoCodecName(peerConnectionParameters), false);
+      }
+      final SessionDescription sdp = new SessionDescription(origSdp.type, sdpDescription);
+      localSdp = sdp;
+      executor.execute(() -> {
+        if (peerConnection != null && !isError) {
+          Log.d(TAG, "Set local SDP from " + sdp.type);
+          /* 设置 Offer Sdp */
+          peerConnection.setLocalDescription(sdpObserver, sdp);
+        }
+      });
+    }
+
+    ...
+}
+
+// PeerConnection.java
+public void setLocalDescription(SdpObserver observer, SessionDescription sdp) {
+    /* 调用 Native 函数 */
+    nativeSetLocalDescription(observer, sdp);
+}
+```
+
+Native 层调用
+```c++
+// out/android_arm64_Debug/gen/sdk/android/generated_peerconnection_jni/PeerConnection_jni.h
+JNI_GENERATOR_EXPORT void Java_org_webrtc_PeerConnection_nativeSetLocalDescription(
+    JNIEnv* env,
+    jobject jcaller,
+    jobject observer,
+    jobject sdp) {
+  return JNI_PeerConnection_SetLocalDescription(env, base::android::JavaParamRef<jobject>(env,
+      jcaller), base::android::JavaParamRef<jobject>(env, observer),
+      base::android::JavaParamRef<jobject>(env, sdp));
+}
+
+// sdk/android/src/jni/pc/peer_connection.cc
+static void JNI_PeerConnection_SetLocalDescription(
+    JNIEnv* jni,
+    const JavaParamRef<jobject>& j_pc,
+    const JavaParamRef<jobject>& j_observer,
+    const JavaParamRef<jobject>& j_sdp) {
+  rtc::scoped_refptr<SetSdpObserverJni> observer(
+      new rtc::RefCountedObject<SetSdpObserverJni>(jni, j_observer, nullptr));
+  ExtractNativePC(jni, j_pc)->SetLocalDescription(
+      observer, JavaToNativeSessionDescription(jni, j_sdp).release());
+}
+
+// pc/peer_connection.cc
+void PeerConnection::SetLocalDescription(
+    SetSessionDescriptionObserver* observer,
+    SessionDescriptionInterface* desc_ptr) {
+  RTC_DCHECK_RUN_ON(signaling_thread());
+  // Chain this operation. If asynchronous operations are pending on the chain,
+  // this operation will be queued to be invoked, otherwise the contents of the
+  // lambda will execute immediately.
+  /* 如上面注释所述，operations_chain_ 其实是一个半异步操作，内部是一个先进先出的队列，缓存着要执行的任务，
+   * 但如果插入任务时刚好是第一个，则立即执行，否则，只做插入操作就返回，该次插入的任务等待前面任务完成后自动调用执行。
+   */
+  operations_chain_->ChainOperation(
+      [this_weak_ptr = weak_ptr_factory_.GetWeakPtr(),
+       observer_refptr =
+           rtc::scoped_refptr<SetSessionDescriptionObserver>(observer),
+       desc = std::unique_ptr<SessionDescriptionInterface>(desc_ptr)](
+          std::function<void()> operations_chain_callback) mutable {
+        // Abort early if |this_weak_ptr| is no longer valid.
+        if (!this_weak_ptr) {
+          // For consistency with DoSetLocalDescription(), we DO NOT inform the
+          // |observer_refptr| that the operation failed in this case.
+          // TODO(hbos): If/when we process SLD messages in ~PeerConnection,
+          // the consistent thing would be to inform the observer here.
+          // 通知 operations_chain_，当前任务已经执行完成，operations_chain_ 会从队列中删除该任务，并执行下一个任务
+          operations_chain_callback();
+          return;
+        }
+        /* 设置 Offer Sdp, 此操作当前为同步执行，因为 operations_chain_ 内还没有其他任务 */
+        this_weak_ptr->DoSetLocalDescription(std::move(desc),
+                                             std::move(observer_refptr));
+        // DoSetLocalDescription() is currently implemented as a synchronous
+        // operation but where the |observer|'s callbacks are invoked
+        // asynchronously in a post to OnMessage().
+        // For backwards-compatability reasons, we declare the operation as
+        // completed here (rather than in OnMessage()). This ensures that
+        // subsequent offer/answer operations can start immediately (without
+        // waiting for OnMessage()).
+        operations_chain_callback();
+      });
+}
+
+void PeerConnection::DoSetLocalDescription(
+    std::unique_ptr<SessionDescriptionInterface> desc,
+    rtc::scoped_refptr<SetSessionDescriptionObserver> observer) {
+  
+  /* 一堆校验，忽略 */
+  ...
+
+  // Grab the description type before moving ownership to ApplyLocalDescription,
+  // which may destroy it before returning.
+  const SdpType type = desc->GetType();
+
+  error = ApplyLocalDescription(std::move(desc));
+  // |desc| may be destroyed at this point.
+
+  if (!error.ok()) {
+    /* Local Sdp 设置失败，发送 MSG_SET_SESSIONDESCRIPTION_FAILED 消息，再通过 observer 回调上层 */
+    ...
+
+    return;
+  }
+
+  /* Local Sdp 设置成功，发送 MSG_SET_SESSIONDESCRIPTION_SUCCESS 消息，再通过 observer 回调上层 */
+  PostSetSessionDescriptionSuccess(observer);
+
+  // MaybeStartGathering needs to be called after posting
+  // MSG_SET_SESSIONDESCRIPTION_SUCCESS, so that we don't signal any candidates
+  // before signaling that SetLocalDescription completed.
+  /* 开始 ICE 地址收集 */
+  transport_controller_->MaybeStartGathering();
+
+  ...
+}
+
+RTCError PeerConnection::ApplyLocalDescription(
+    std::unique_ptr<SessionDescriptionInterface> desc) {
+  
+  ...
+
+  /* 根据是否已存在 remote sdp 判断是否发起方 */
+  if (!is_caller_) {
+    if (remote_description()) {
+      // Remote description was applied first, so this PC is the callee.
+      is_caller_ = false;
+    } else {
+      // Local description is applied first, so this PC is the caller.
+      is_caller_ = true;
+    }
+  }
+
+  ...
+
+  /* Android RTC demo 使用的是 Unified Plan */
+  if (IsUnifiedPlan()) {
+    /* 1. 创建 MediaChannel, 更新到收发器 */
+    RTCError error = UpdateTransceiversAndDataChannels(
+        cricket::CS_LOCAL, *local_description(), old_local_description,
+        remote_description());
+    if (!error.ok()) {
+      return error;
+    }
+    
+    ...
+
+  } else {
+    // Media channels will be created only when offer is set. These may use new
+    // transports just created by PushdownTransportDescription.
+    if (type == SdpType::kOffer) {
+      // TODO(bugs.webrtc.org/4676) - Handle CreateChannel failure, as new local
+      // description is applied. Restore back to old description.
+      RTCError error = CreateChannels(*local_description()->description());
+      if (!error.ok()) {
+        return error;
+      }
+    }
+    // Remove unused channels if MediaContentDescription is rejected.
+    RemoveUnusedChannels(local_description()->description());
+  }
+
+  /* 2. 创建 VideoSendStream 或 AudioSendStream */
+  error = UpdateSessionState(type, cricket::CS_LOCAL,
+                             local_description()->description());
+  if (!error.ok()) {
+    return error;
+  }
+
+  ...
+
+  if (IsUnifiedPlan()) {
+    for (const auto& transceiver : transceivers_) {
+      const ContentInfo* content =
+          FindMediaSectionForTransceiver(transceiver, local_description());
+      if (!content) {
+        continue;
+      }
+      cricket::ChannelInterface* channel = transceiver->internal()->channel();
+      if (content->rejected || !channel || channel->local_streams().empty()) {
+        // 0 is a special value meaning "this sender has no associated send
+        // stream". Need to call this so the sender won't attempt to configure
+        // a no longer existing stream and run into DCHECKs in the lower
+        // layers.
+        transceiver->internal()->sender_internal()->SetSsrc(0);
+      } else {
+        // Get the StreamParams from the channel which could generate SSRCs.
+        const std::vector<StreamParams>& streams = channel->local_streams();
+        transceiver->internal()->sender_internal()->set_stream_ids(
+            streams[0].stream_ids());
+        
+        /* 3. 设置 RtpSender 的 ssrc, 同时触发添加 VideoStreamEncoder 到 VideoSource */
+        transceiver->internal()->sender_internal()->SetSsrc(
+            streams[0].first_ssrc());
+      }
+    }
+  } else {
+    // Plan B semantics.
+
+    // Update state and SSRC of local MediaStreams and DataChannels based on the
+    // local session description.
+    const cricket::ContentInfo* audio_content =
+        GetFirstAudioContent(local_description()->description());
+    if (audio_content) {
+      if (audio_content->rejected) {
+        RemoveSenders(cricket::MEDIA_TYPE_AUDIO);
+      } else {
+        const cricket::AudioContentDescription* audio_desc =
+            audio_content->media_description()->as_audio();
+        UpdateLocalSenders(audio_desc->streams(), audio_desc->type());
+      }
+    }
+
+    const cricket::ContentInfo* video_content =
+        GetFirstVideoContent(local_description()->description());
+    if (video_content) {
+      if (video_content->rejected) {
+        RemoveSenders(cricket::MEDIA_TYPE_VIDEO);
+      } else {
+        const cricket::VideoContentDescription* video_desc =
+            video_content->media_description()->as_video();
+        UpdateLocalSenders(video_desc->streams(), video_desc->type());
+      }
+    }
+  }
+
+  ...
+
+  return RTCError::OK();
+}
+
+/**********************************************************/
+/* 1. 创建 MediaChannel, 更新到收发器, 限于 Unified Plan 模式 */
+RTCError PeerConnection::UpdateTransceiversAndDataChannels(
+    cricket::ContentSource source,
+    const SessionDescriptionInterface& new_session,
+    const SessionDescriptionInterface* old_local_description,
+    const SessionDescriptionInterface* old_remote_description) {
+  
+  ...
+
+  const ContentInfos& new_contents = new_session.description()->contents();
+  for (size_t i = 0; i < new_contents.size(); ++i) {
+    const cricket::ContentInfo& new_content = new_contents[i];
+    cricket::MediaType media_type = new_content.media_description()->type();
+    mid_generator_.AddKnownId(new_content.name);
+    if (media_type == cricket::MEDIA_TYPE_AUDIO ||
+        media_type == cricket::MEDIA_TYPE_VIDEO) {
+      
+      ...
+
+      /* sdp 与 收发器 Transceiver 进行关联(通过 mline_index)，更新 Transceiver 的 mid，返回 Transceiver. */
+      auto transceiver_or_error =
+          AssociateTransceiver(source, new_session.GetType(), i, new_content,
+                               old_local_content, old_remote_content);
+      if (!transceiver_or_error.ok()) {
+        return transceiver_or_error.MoveError();
+      }
+      auto transceiver = transceiver_or_error.MoveValue();
+      RTCError error =
+          UpdateTransceiverChannel(transceiver, new_content, bundle_group);
+      if (!error.ok()) {
+        return error;
+      }
+    } else if (media_type == cricket::MEDIA_TYPE_DATA) {
+      ...
+    } else {
+      LOG_AND_RETURN_ERROR(RTCErrorType::INTERNAL_ERROR,
+                           "Unknown section type.");
+    }
+  }
+
+  return RTCError::OK();
+}
+
+/* 创建及关联 MediaChannel */
+RTCError PeerConnection::UpdateTransceiverChannel(
+    rtc::scoped_refptr<RtpTransceiverProxyWithInternal<RtpTransceiver>>
+        transceiver,
+    const cricket::ContentInfo& content,
+    const cricket::ContentGroup* bundle_group) {
+  RTC_DCHECK(IsUnifiedPlan());
+  RTC_DCHECK(transceiver);
+  cricket::ChannelInterface* channel = transceiver->internal()->channel();
+  if (content.rejected) {
+    if (channel) {
+      transceiver->internal()->SetChannel(nullptr);
+      DestroyChannelInterface(channel);
+    }
+  } else {
+    if (!channel) {
+      if (transceiver->media_type() == cricket::MEDIA_TYPE_AUDIO) {
+        /* 创建音频 Channel */
+        channel = CreateVoiceChannel(content.name);
+      } else {
+        /* 创建视频 Channel */
+        channel = CreateVideoChannel(content.name);
+      }
+      if (!channel) {
+        LOG_AND_RETURN_ERROR(
+            RTCErrorType::INTERNAL_ERROR,
+            "Failed to create channel for mid=" + content.name);
+      }
+
+      /* 设置 Channel 到收发器内，并将 MediaChannel 设置到收发器内的每个 RtpSender 和 RtpReceiver */
+      transceiver->internal()->SetChannel(channel);
+    }
+  }
+  return RTCError::OK();
+}
+
+/* 创建 VideoChannel，保存着 MediaChannel */
+cricket::VideoChannel* PeerConnection::CreateVideoChannel(
+    const std::string& mid) {
+  /* Rtp/Rtcp 数据包发送接口 */
+  RtpTransportInternal* rtp_transport = GetRtpTransport(mid);
+  /* rtp 包最大包长配置 */
+  MediaTransportConfig media_transport_config =
+      transport_controller_->GetMediaTransportConfig(mid);
+
+  /* 创建视频 VideoChannel */
+  cricket::VideoChannel* video_channel = channel_manager()->CreateVideoChannel(
+      call_ptr_, configuration_.media_config, rtp_transport,
+      media_transport_config, signaling_thread(), mid, SrtpRequired(),
+      GetCryptoOptions(), &ssrc_generator_, video_options_,
+      video_bitrate_allocator_factory_.get());
+  if (!video_channel) {
+    return nullptr;
+  }
+
+  video_channel->SignalDtlsSrtpSetupFailure.connect(
+      this, &PeerConnection::OnDtlsSrtpSetupFailure);
+  video_channel->SignalSentPacket.connect(this,
+                                          &PeerConnection::OnSentPacket_w);
+  video_channel->SetRtpTransport(rtp_transport);
+
+  return video_channel;
+}
+
+// pc/channel_manager.cc
+// 创建 VideoMediaChannel, 基类是 MediaChannel
+VideoChannel* ChannelManager::CreateVideoChannel(
+    webrtc::Call* call,
+    const cricket::MediaConfig& media_config,
+    webrtc::RtpTransportInternal* rtp_transport,
+    const webrtc::MediaTransportConfig& media_transport_config,
+    rtc::Thread* signaling_thread,
+    const std::string& content_name,
+    bool srtp_required,
+    const webrtc::CryptoOptions& crypto_options,
+    rtc::UniqueRandomIdGenerator* ssrc_generator,
+    const VideoOptions& options,
+    webrtc::VideoBitrateAllocatorFactory* video_bitrate_allocator_factory) {
+  
+  ...
+
+  /* 通过 WebRtcVideoEngine 创建 WebRtcVideoChannel, 基类是 VideoMediaChannel */
+  VideoMediaChannel* media_channel = media_engine_->video().CreateMediaChannel(
+      call, media_config, options, crypto_options,
+      video_bitrate_allocator_factory);
+  if (!media_channel) {
+    return nullptr;
+  }
+
+  /* 创建 VideoChannel，保存 media_channel 到 VideoChannel 的基类 BaseChannel 中 */
+  auto video_channel = std::make_unique<VideoChannel>(
+      worker_thread_, network_thread_, signaling_thread,
+      absl::WrapUnique(media_channel), content_name, srtp_required,
+      crypto_options, ssrc_generator);
+
+  /* 初始化 VideoChannel，实际是调用基类 BaseChannel::Init_w()， 设置 media_channel 的 Rtp 发送接口 */
+  video_channel->Init_w(rtp_transport, media_transport_config);
+    ---> BaseChannel::Init_w()
+      --> WebRtcVideoChannel::SetInterface()
+        --> MediaChannel::SetInterface(iface, media_transport_config)
+
+  /* 保存 VideoChannel */
+  VideoChannel* video_channel_ptr = video_channel.get();
+  video_channels_.push_back(std::move(video_channel));
+  return video_channel_ptr;
+}
+
+/* 设置 Channel */
+void RtpTransceiver::SetChannel(cricket::ChannelInterface* channel) {
+  // Cannot set a non-null channel on a stopped transceiver.
+  if (stopped_ && channel) {
+    return;
+  }
+
+  ...
+
+  channel_ = channel;
+
+  if (channel_) {
+    channel_->SignalFirstPacketReceived().connect(
+        this, &RtpTransceiver::OnFirstPacketReceived);
+  }
+
+  for (const auto& sender : senders_) {
+    sender->internal()->SetMediaChannel(channel_ ? channel_->media_channel()
+                                                 : nullptr);
+  }
+
+  for (const auto& receiver : receivers_) {
+    if (!channel_) {
+      receiver->internal()->Stop();
+    }
+
+    receiver->internal()->SetMediaChannel(channel_ ? channel_->media_channel()
+                                                   : nullptr);
+  }
+}
+
+/*********************************************/
+/* 2. 创建 VideoSendStream 或 AudioSendStream */
+
+RTCError PeerConnection::UpdateSessionState(
+    SdpType type,
+    cricket::ContentSource source,
+    const cricket::SessionDescription* description) {
+  
+  ...
+
+  // Update internal objects according to the session description's media
+  // descriptions.
+  RTCError error = PushdownMediaDescription(type, source);
+  if (!error.ok()) {
+    return error;
+  }
+
+  return RTCError::OK();
+}
+
+RTCError PeerConnection::PushdownMediaDescription(
+    SdpType type,
+    cricket::ContentSource source) {
+  const SessionDescriptionInterface* sdesc =
+      (source == cricket::CS_LOCAL ? local_description()
+                                   : remote_description());
+  RTC_DCHECK(sdesc);
+
+  // Push down the new SDP media section for each audio/video transceiver.
+  for (const auto& transceiver : transceivers_) {
+    const ContentInfo* content_info =
+        FindMediaSectionForTransceiver(transceiver, sdesc);
+    cricket::ChannelInterface* channel = transceiver->internal()->channel();
+    
+    ...
+
+    std::string error;
+    bool success = (source == cricket::CS_LOCAL)
+                       ? channel->SetLocalContent(content_desc, type, &error)
+                       : channel->SetRemoteContent(content_desc, type, &error);
+    if (!success) {
+      LOG_AND_RETURN_ERROR(RTCErrorType::INVALID_PARAMETER, error);
+    }
+  }
+
+  ...
+
+  return RTCError::OK();
+}
+
+bool VideoChannel::SetLocalContent_w(const MediaContentDescription* content,
+                                     SdpType type,
+                                     std::string* error_desc) {
+  
+  ...
+
+  if (!media_channel()->SetRecvParameters(recv_params)) {
+    SafeSetError("Failed to set local video description recv parameters.",
+                 error_desc);
+    return false;
+  }
+
+  ...
+
+  last_recv_params_ = recv_params;
+
+  if (needs_send_params_update) {
+    if (!media_channel()->SetSendParameters(send_params)) {
+      SafeSetError("Failed to set send parameters.", error_desc);
+      return false;
+    }
+    last_send_params_ = send_params;
+  }
+
+  // TODO(pthatcher): Move local streams into VideoSendParameters, and
+  // only give it to the media channel once we have a remote
+  // description too (without a remote description, we won't be able
+  // to send them anyway).
+  if (!UpdateLocalStreams_w(video->streams(), type, error_desc)) {
+    SafeSetError("Failed to set local video description streams.", error_desc);
+    return false;
+  }
+
+  set_local_content_direction(content->direction());
+  UpdateMediaSendRecvState_w();
+  return true;
+}
+
+bool BaseChannel::UpdateLocalStreams_w(const std::vector<StreamParams>& streams,
+                                       SdpType type,
+                                       std::string* error_desc) {
+  // In the case of RIDs (where SSRCs are not negotiated), this method will
+  // generate an SSRC for each layer in StreamParams. That representation will
+  // be stored internally in |local_streams_|.
+  // In subsequent offers, the same stream can appear in |streams| again
+  // (without the SSRCs), so it should be looked up using RIDs (if available)
+  // and then by primary SSRC.
+  // In both scenarios, it is safe to assume that the media channel will be
+  // created with a StreamParams object with SSRCs. However, it is not safe to
+  // assume that |local_streams_| will always have SSRCs as there are scenarios
+  // in which niether SSRCs or RIDs are negotiated.
+
+  // Check for streams that have been removed.
+  bool ret = true;
+  
+  ...
+
+  // Check for new streams.
+  std::vector<StreamParams> all_streams;
+  for (const StreamParams& stream : streams) {
+    StreamParams* existing = GetStream(local_streams_, StreamFinder(&stream));
+    if (existing) {
+      // Parameters cannot change for an existing stream.
+      all_streams.push_back(*existing);
+      continue;
+    }
+
+    all_streams.push_back(stream);
+    StreamParams& new_stream = all_streams.back();
+
+    ...
+
+    // At this point we use the legacy simulcast group in StreamParams to
+    // indicate that we want multiple layers to the media channel.
+    if (!new_stream.has_ssrcs()) {
+      // TODO(bugs.webrtc.org/10250): Indicate if flex is desired here.
+      new_stream.GenerateSsrcs(new_stream.rids().size(), /* rtx = */ true,
+                               /* flex_fec = */ false, ssrc_generator_);
+    }
+
+    /* 创建 VideoSendStream */
+    media_channel()->AddSendStream(new_stream);
+    --> WebRtcVideoChannel::AddSendStream(const StreamParams& sp) // webrtc_video_engine.cc
+      --> WebRtcVideoChannel::WebRtcVideoSendStream::WebRtcVideoSendStream()
+        --> WebRtcVideoChannel::WebRtcVideoSendStream::SetCodec()
+          --> WebRtcVideoChannel::WebRtcVideoSendStream::RecreateWebRtcStream()
+            --> webrtc::VideoSendStream* Call::CreateVideoSendStream() // call/call.cc
+              --> VideoSendStream::VideoSendStream() // video/video_send_stream.cc
+                --> video_stream_encoder_ = CreateVideoStreamEncoder()
+  }
+
+  local_streams_ = all_streams;
+  return ret;
+}
+
+/**************************************************************************/
+/* 3. 设置 RtpSender 的 ssrc, 同时触发添加 VideoStreamEncoder 到 VideoSource */
+// pc/rtp_sender.cc
+
+void RtpSenderBase::SetSsrc(uint32_t ssrc) {
+  TRACE_EVENT0("webrtc", "RtpSenderBase::SetSsrc");
+  if (stopped_ || ssrc == ssrc_) {
+    return;
+  }
+  // If we are already sending with a particular SSRC, stop sending.
+  if (can_send_track()) {
+    ClearSend();
+    RemoveTrackFromStats();
+  }
+  ssrc_ = ssrc;
+  // can_send_track() 判断 track_ 及 ssrc_ 是否存在。此时已满足条件。
+  if (can_send_track()) {
+    // 调用子类的 SetSend()
+    SetSend();
+    AddTrackToStats();
+  }
+  
+  ...
+}
+
+
+// 
+void VideoRtpSender::SetSend() {
+  ...
+
+  cricket::VideoOptions options;
+  /* 获取 VideoSource，该创建详见 */
+  VideoTrackSourceInterface* source = video_track()->GetSource();
+  if (source) {
+    options.is_screencast = source->is_screencast();
+    options.video_noise_reduction = source->needs_denoising();
+  }
+  options.content_hint = cached_track_content_hint_;
+  switch (cached_track_content_hint_) {
+    case VideoTrackInterface::ContentHint::kNone:
+      break;
+    case VideoTrackInterface::ContentHint::kFluid:
+      options.is_screencast = false;
+      break;
+    case VideoTrackInterface::ContentHint::kDetailed:
+    case VideoTrackInterface::ContentHint::kText:
+      options.is_screencast = true;
+      break;
+  }
+
+  /* 设置 VideoSource, 将 VideoStreamEncoder 作为 VideoSink 添加到 VideoSource */
+  bool success = worker_thread_->Invoke<bool>(RTC_FROM_HERE, [&] {
+    return video_media_channel()->SetVideoSend(ssrc_, &options, video_track());
+  });
+  RTC_DCHECK(success);
+}
+
+// media/engine/webrt_video_engine.cc
+bool WebRtcVideoChannel::SetVideoSend(
+    uint32_t ssrc,
+    const VideoOptions* options,
+    rtc::VideoSourceInterface<webrtc::VideoFrame>* source) {
+  
+  ...
+
+  // 查找 VideoSendStream
+  const auto& kv = send_streams_.find(ssrc);
+  if (kv == send_streams_.end()) {
+    // Allow unknown ssrc only if source is null.
+    RTC_CHECK(source == nullptr);
+    RTC_LOG(LS_ERROR) << "No sending stream on ssrc " << ssrc;
+    return false;
+  }
+
+  return kv->second->SetVideoSend(options, source);
+}
+
+bool WebRtcVideoChannel::WebRtcVideoSendStream::SetVideoSend(
+    const VideoOptions* options,
+    rtc::VideoSourceInterface<webrtc::VideoFrame>* source) {
+  
+  ...
+
+  /* WebRtcVideoSendStream 创建时 source_ 为空，所以在创建时和这里都不会调用 SetSource */
+  if (source_ && stream_) {
+    stream_->SetSource(nullptr, webrtc::DegradationPreference::DISABLED);
+  }
+  // Switch to the new source.
+  source_ = source;
+  /* source_ 不为空，及VideoSendStream 已经创建，调用 SetSource() */
+  if (source && stream_) {
+    // 此处参数 this 为 WebRtcVideoSendStream，即后面流程添加 Sink 的 source
+    stream_->SetSource(this, GetDegradationPreference());
+    --> VideoSendStream::SetSource(source, degradation_preference) // video/video_send_stream.cc
+      --> VideoStreamEncoder::SetSource(source, degradation_preference) // video/video_stream_encoder.cc
+        --> VideoSourceSinkController::SetSource(source, degradation_preference) // video/video_source_sink_controller.cc
+              // 此处 sink_ 为 VideoStreamEncoder， 是 VideoSourceSinkController 在 VideoStreamEncoder 创建时传入
+          --> source->AddOrUpdateSink(sink_, wants);
+            --> WebRtcVideoChannel::WebRtcVideoSendStream::AddOrUpdateSink(sink, wants) // media/engine/webrt_video_engine.cc
+              --> encoder_sink_ = sink; // 保存 sink
+                  // 此处 source_ 实为 VideoTrack，后续流程与添加视频预览 sink 基本一致。可回看上一节 《3.4.3》。
+              --> source_->AddOrUpdateSink(encoder_sink_, wants)
+                --> VideoTrack::AddOrUpdateSink(sink, wants)
+                  --> video_source_->AddOrUpdateSink(sink, modified_wants)
+  }
+  return true;
+}
+
+
+```
+
 ### 3.5 摄像头视频数据流
 ```
 (Camera2 或 Camera1 使能 captureToTexture) (SurfaceTextureHelper.java) SurfaceTextureHelper.listener.onFrame() -->
@@ -2480,9 +3286,12 @@ Camera1Session/Camera2Session --> (CameraCapturer.java) CameraSession.Events.onF
 --> (NativeAndroidVideoTrackSource.java) NativeAndroidVideoTrackSource.onFrameCaptured() 
 --> (android_video_track_source.cc) AndroidVideoTrackSource.onFrameCaptured()
 --> (adapted_video_track_source.cc) AdaptedVideoTrackSource::OnFrame() --> broadcaster_.OnFrame(frame)
-// 视频预览
+// 分支1：视频预览
 --> (sdk/android/src/jni/video_sink.cc) VideoSinkWrapper::::OnFrame(VideoFrame)
 --> (gen/sdk/android/generated_video_jni/VideoSink_jni.h) Java_VideoSink_onFrame(VideoFrame) // 映射到 Java 层 VideoFrame
 --> (CallActivity.java) ProxyVideoSink::onFrame() --> target.onFrame(VideoFrame)
 --> (SurfaceViewRenderer.java) SurfaceViewRenderer::onFrame(VideoFrame)
+
+// 分支2：视频编码
+--> (video/video_stream_encoder.cc) VideoStreamEncoder::OnFrame(VideoFrame)
 ```
