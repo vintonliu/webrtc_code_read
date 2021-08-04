@@ -1,0 +1,31 @@
+@startuml peerconnection-class
+autonumber "<b>[S00]"
+skinparam style strictuml
+skinparam sequenceArrowThickness 2
+skinparam roundcorner 20
+skinparam maxmessagesize 60
+
+participant "PeerConnectionFactory" as A
+participant "BasicPortAllocator" as B
+participant "PeerConnection" as C
+participant "CallFactory" as D
+participant "Call" as E
+
+A++
+A -> A++ #FFBBBB : CreatePeerConnection()
+A -> A : new RTCCertificateGenerator()
+A -> A : new BasicPortAllocator()
+A -> A : new BasicAsyncResolverFactory()
+A -> A : new DefaultIceTransportFactory()
+A -> C : SetNetworkIgnoreMask()
+A -> A : CreateRtcEventLog_w()
+A -> D ++ : CreateCall()
+D -> E ++ : Create()
+E --> D -- : Call*
+D --> A -- : Call*
+A -> C ++ : new
+A -> C : Initialize()
+C --> A -- : success 
+A --
+
+@enduml

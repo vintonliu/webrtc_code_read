@@ -1,0 +1,57 @@
+@startuml PC-demo-1
+autonumber "<b>[T00]"
+skinparam style strictuml
+skinparam sequenceArrowThickness 2
+skinparam roundcorner 20
+skinparam maxmessagesize 60
+
+actor User
+participant "MainWnd" as A
+participant "Conductor" as B
+participant "PeerConnectionClient" as C
+participant "AsyncSocket" as D
+
+User -> A ++ : //连接登录 Connect
+A -> B ++ : StartLogin()
+B -> C ++ : Connect()
+C -> C ++ #FFBBBB : DoConnect()
+
+C --> D ++ : Connect()
+D --> C -- : success
+C--
+C --> B -- : success
+B --> A -- : success
+
+D --> C ++ : OnConnect()
+C -> D ++ : Send(sign_in)
+D --> C -- : OnRead()
+C --> B ++ : OnSignedIn()
+C--
+B --> A -- : //显示peer列表 SwitchToPeerList()
+
+A --> User --: Done
+
+User -> A ++ : 连接 peer
+A -> B ++ : ConnectToPeer()
+B -> B : InitializePeerConnection()
+B -> B: AddTracks()
+B -> A: //开始本地渲染 StartLocalRenderer()
+B -> B: CreateOffer()
+B -> B: OnSuccess(offer sdp)
+B -> B: SendMessage()
+B -> A: QueueUIThreadCallback(msg, SEND_MESSAGE_TO_PEER)
+A -> B: UIThreadCallback(msg)
+B -> C ++ : //发送本地sdp SendToPeer(msg:sdp)
+C -> D ++ : Send()
+D --> C -- : success
+C --> B -- : success
+B --> A -- : success
+
+D -> C ++ : OnHangingGetRead()
+C -> B ++ : //接收到远端sdp OnMessageFromPeer(sdp)
+C--
+B -> B: SetRemoteDescription()
+B -> B: OnAddTrack()
+B -> B: UIThreadCallback(NEW_TRACK_ADDED)
+B -> A -- : //开始远端视频渲染 StartRemoteRenderer()
+@enduml

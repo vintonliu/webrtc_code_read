@@ -1,0 +1,149 @@
+@startuml pc-mediaengine-class
+abstract class PeerConnectionFactoryInterface
+{
+    + {abstract} void SetOptions(const Options& options)
+    ..
+    + {abstract} PeerConnectionInterface> CreatePeerConnection()
+    ..
+    + {abstract} RtpCapabilities GetRtpSenderCapabilities()
+    ..
+    + {abstract} RtpCapabilities GetRtpReceiverCapabilities()
+    ..
+    + {abstract} MediaStreamInterface CreateLocalMediaStream()
+    ..
+    + {abstract} AudioSourceInterface CreateAudioSource()
+    ..
+    + {abstract} VideoTrackInterface CreateVideoTrack()
+    ..
+    + {abstract} AudioTrackInterface CreateAudioTrack()
+    ..
+    + bool StartAecDump()
+    ..
+    + {abstract} void StopAecDump()
+}
+
+class PeerConnectionFactory
+{
+    PeerConnectionInterface CreatePeerConnection()
+    ..
+    + {method} bool Initialize()
+    ..
+    + {method} virtual cricket::ChannelManager* channel_manager()
+__ private method __
+    - {method} RtcEventLog CreateRtcEventLog_w()
+    - {method} Call CreateCall_w(RtcEventLog* event_log)
+__ private field __
+    - {field} rtc::Thread* network_thread_
+    - {field} rtc::Thread* worker_thread_
+    - {field} rtc::Thread* signaling_thread_
+    - {field} cricket::ChannelManager channel_manager_;
+    - {field} rtc::BasicNetworkManager default_network_manager_
+    - {field} rtc::BasicPacketSocketFactory default_socket_factory_
+    - {field} cricket::MediaEngineInterface media_engine_
+    - {field} webrtc::CallFactoryInterface call_factory_
+    - {field} RtcEventLogFactoryInterface event_log_factory_
+    - {field} FecControllerFactoryInterface fec_controller_factory_
+    - {field} NetworkStatePredictorFactoryInterface network_state_predictor_factory_
+    - {field} NetworkControllerFactoryInterface injected_network_controller_factory_
+    - {field} MediaTransportFactory media_transport_factory_
+    - {field} NetEqFactory neteq_factory_
+    - {field} WebRtcKeyValueConfig trials_
+}
+
+note right of PeerConnectionFactory::channel_manager_
+音视频 MediaChannel 管理
+end note
+note right of PeerConnectionFactory::media_engine_
+音视频媒体引擎
+end note
+note right of PeerConnectionFactory::call_factory_
+创建Call的工厂类,
+可以创建带网络模拟的
+DegradedCall
+end note
+
+PeerConnectionFactoryInterface <|-- PeerConnectionFactory
+
+abstract class MediaEngineInterface
+{
+    + {abstract} bool Init()
+    ..
+    + {abstract} VoiceEngineInterface& voice()
+    ..
+    + {abstract} VideoEngineInterface& video()
+    ..
+    + {abstract} const VoiceEngineInterface& voice()
+    ..
+    + {abstract} const VideoEngineInterface& video()
+}
+
+class CompositeMediaEngine
+{
+    __private field__
+    - {field} VoiceEngineInterface voice_engine_
+    - {field} VideoEngineInterface video_engine_
+}
+
+MediaEngineInterface <|-- CompositeMediaEngine
+PeerConnectionFactory::media_engine_ *-- CompositeMediaEngine
+
+abstract class VoiceEngineInterface
+{
+    + {abstract} void Init()
+    ..
+    + {abstract} webrtc::AudioState GetAudioState()
+    ..
+    + {abstract} VoiceMediaChannel* CreateMediaChannel()
+    ..
+    + {abstract} std::vector<AudioCodec>& send_codecs()
+    ..
+    + {abstract} std::vector<AudioCodec>& recv_codecs()
+    ..
+    + {abstract} bool StartAecDump(webrtc::FileWrapper file, int64_t max_size_bytes)
+    ..
+    + {abstract} void StopAecDump()
+}
+
+abstract class VideoEngineInterface
+{
+    + {abstract} VideoMediaChannel* CreateMediaChannel()
+    ..
+    + {abstract} std::vector<VideoCodec>& send_codecs()
+    ..
+    + {abstract} std::vector<VideoCodec>& recv_codecs()
+}
+
+class WebRtcVoiceEngine
+{
+    + {method} void RegisterChannel(WebRtcVoiceMediaChannel* channel)
+    ..
+    + {method} void UnregisterChannel(WebRtcVoiceMediaChannel* channel)
+    ..
+    + {method} webrtc::AudioDeviceModule* adm()
+    ..
+    + {method} webrtc::AudioProcessing* apm() const
+    __private field__
+    - {field} webrtc::AudioDeviceModule adm_
+    - {field} webrtc::AudioEncoderFactory encoder_factory_
+    - {field} webrtc::AudioDecoderFactory decoder_factory_
+    - {field} webrtc::AudioMixer audio_mixer_
+    - {field} webrtc::AudioProcessing apm_
+    - {field} webrtc::AudioState audio_state_
+    - {field} std::vector<WebRtcVoiceMediaChannel*> channels_
+}
+
+VoiceEngineInterface <|-- WebRtcVoiceEngine
+CompositeMediaEngine::voice_engine_ *-- WebRtcVoiceEngine
+
+class WebRtcVideoEngine
+{
+    __private field__
+    - {field} webrtc::VideoDecoderFactory decoder_factory_
+    - {field} webrtc::VideoEncoderFactory encoder_factory_
+    - {field} webrtc::VideoBitrateAllocatorFactory
+      bitrate_allocator_factory_
+}
+
+VideoEngineInterface <|-- WebRtcVideoEngine
+CompositeMediaEngine::video_engine_ *-- WebRtcVideoEngine
+@enduml

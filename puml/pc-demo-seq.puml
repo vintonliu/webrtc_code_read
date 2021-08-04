@@ -1,0 +1,53 @@
+@startuml pc-demo-seq
+autonumber "<b>[S00]"
+skinparam style strictuml
+skinparam sequenceArrowThickness 2
+skinparam roundcorner 20
+skinparam maxmessagesize 60
+
+participant "Conductor" as A
+participant "PeerConnectionFactory" as C
+participant "PeerConnection" as D
+participant "CapturerTrackSource" as E
+
+activate A
+A -> A ++ #FFBBBB : InitializePeerConnection()
+
+A -> C ++: //创建factory CreatePeerConnectionFactory()
+C -> C ++ #DarkSalmon : CreateModularPeerConnectionFactory()
+
+C -> C : //构建PeerConnectionFactory new
+C -> C--: Initialize()
+C --> A -- : success
+
+A -> C ++: //创建 pc CreatePeerConnection()
+C -> D ++: 构建PeerConnection
+C -> D: Initialize()
+D --> C --: success
+C --> A --: success
+
+A -> A ++ #DarkSalmon : //添加音视频track AddTracks()
+A -> C ++ : CreateAudioSource()
+C --> A -- : AudioSourceInterface 
+A -> C ++ : CreateAudioTrack(AudioSourceInterface)
+C --> A -- : AudioTrackInterface
+
+A -> D ++ : AddTrack(AudioTrackInterface)
+D --> A -- : RtpSenderInterface 
+
+A -> E ++ : //创建视频采集设备 CapturerTrackSource::Create()
+E --> A -- : CapturerTrackSource
+
+A -> C ++ : CreateVideoTrack()
+C --> A -- : VideoTrackInterface
+
+A -> A: //启动本地视频渲染 main_wnd_->StartLocalRenderer(video_track_)
+
+A -> D ++ : AddTrack(VideoTrackInterface)
+D --> A -- : RtpSenderInterface
+A--
+A--
+A -> D ++ : //创建本地sdp CreateOffer()
+D --> A -- : OnSuccess() 
+A--
+@enduml

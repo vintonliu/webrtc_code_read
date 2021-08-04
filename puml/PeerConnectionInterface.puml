@@ -1,0 +1,74 @@
+@startuml PeerConnectionInterface
+abstract class PeerConnectionInterface
+{
+    + {abstract} StreamCollectionInterface local_streams()
+    ..
+    + {abstract} StreamCollectionInterface remote_streams()
+    ..
+    + {abstract}  bool AddStream(MediaStreamInterface* stream)
+    ..
+    + {abstract} void RemoveStream(MediaStreamInterface* stream)
+    ..
+    + {abstract} <RtpSenderInterface> AddTrack(track, stream_ids)
+    ..
+    + {abstract} bool RemoveTrack(RtpSenderInterface* sender)
+    ..
+    + {abstract} RtpTransceiverInterface AddTransceiver(track)
+    ..
+    + {abstract} RtpTransceiverInterface AddTransceiver(cricket::MediaType media_type)
+    ..
+    + {abstract} RtpSenderInterface CreateSender(kind, stream_id)
+    ..
+    + {abstract} RtpSenderInterface GetSenders()
+    ..
+    + {abstract} RtpReceiverInterface GetReceivers()
+    ..
+    + {abstract} RtpTransceiverInterface GetTransceivers()
+    ..
+    + {abstract} bool GetStats(observer, track, level)
+    ..
+    + {abstract} DataChannelInterface CreateDataChannel()
+    ..
+    + {abstract} SessionDescriptionInterface* local_description()
+    ..
+    + {abstract} SessionDescriptionInterface* remote_description()
+    ..
+    + {abstract} void RestartIce()
+    ..
+    + {abstract} void CreateOffer(observer, options)
+    ..
+    + {abstract} void CreateAnswer(observer, options)
+    ..
+    + {abstract} void SetLocalDescription(observer)
+    ..
+    + {abstract} void SetRemoteDescription(observer)
+    ..
+    + {abstract} bool AddIceCandidate(candidate)
+    ..
+    + {abstract} bool RemoveIceCandidates(candidates)
+    ..
+    + {abstract} void SetAudioPlayout(bool playout)
+    ..
+    + {abstract} void SetAudioRecording(bool recording)
+    ..
+    + {abstract} void Close()
+}
+
+class PeerConnection
+{
+    __internal method__
+    __private field__
+    - {field} PeerConnectionFactory* factory_
+    - {field} PeerConnectionObserver* observer_
+    - {field} RtcEventLog* event_log_
+    - {field} Call* call_
+    - {field} AsyncResolverFactory* async_resolver_factory_
+    - {field} rtc::PacketSocketFactory packet_socket_factory_
+    - {field} webrtc::IceTransportFactory ice_transport_factory_
+    - {field} JsepTransportController transport_controller_
+    - {field} cricket::SctpTransportInternalFactory sctp_factory_
+}
+
+PeerConnectionInterface <|-- PeerConnection
+
+@enduml
