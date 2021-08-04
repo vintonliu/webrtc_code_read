@@ -1,0 +1,37 @@
+@startuml Java 层 VideoTrack 类图
+
+class MediaStreamTrack {
+    + MediaStreamTrack(long nativeTrack)
+    ..
+    + boolean setEnabled(boolean enable)
+    ..
+    + void dispose()
+    ..
+    + long getNativeMediaStreamTrack()
+    ..
+    + String kind()
+}
+
+note right of MediaStreamTrack : Java wrapper for a C++ MediaStreamTrackInterface
+
+class VideoTrack {
+    + VideoTrack(long nativeTrack)
+    ..
+    + void addSink(VideoSink sink)
+    ..
+    + void removeSink(VideoSink sink)
+    ..
+    + long getNativeVideoTrack()
+    ..
+    - long nativeWrapSink(VideoSink sink)
+    ..
+    - void nativeFreeSink(long sink)
+    ..
+    - {field} IdentityHashMap<VideoSink, Long> sinks
+}
+note right of VideoTrack: Java version of VideoTrackInterface
+
+MediaStreamTrack <|-- VideoTrack
+
+note "Java 层 VideoTrack 类图" as N1
+@enduml

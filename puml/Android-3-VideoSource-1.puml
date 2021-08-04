@@ -1,0 +1,84 @@
+@startuml Android-3-VideoSource-1
+abstract class RefCountInterface {
+    + {abstract} void AddRef()
+    ..
+    + {abstract} RefCountReleaseStatus Release()
+}
+
+abstract class NotifierInterface {
+    + {abstract} void RegisterObserver(ObserverInterface* observer)
+    ..
+    + {abstract} void UnregisterObserver(ObserverInterface* observer)
+}
+
+abstract class MediaSourceInterface {
+    + {abstract} SourceState state()
+    + {abstract} bool remote()
+}
+
+NotifierInterface <|-- MediaSourceInterface
+RefCountInterface <|-- MediaSourceInterface
+
+abstract class VideoSourceInterface <<VideoFrame>> {
+    + {abstract} void AddOrUpdateSink(VideoSinkInterface<VideoFrameT>* sink, 
+    const VideoSinkWants& wants)
+    ..
+    + {abstract} void RemoveSink(VideoSinkInterface<VideoFrameT>* sink)
+}
+
+abstract class VideoTrackSourceInterface {
+    + {abstract} bool is_screencast()
+    ..
+    + {abstract} bool needs_denoising()
+    ..
+    + {abstract} bool SupportsEncodedOutput()
+    ..
+    + {abstract} void GenerateKeyFrame()
+    ..
+    + {abstract} void AddEncodedSink(
+      rtc::VideoSinkInterface<RecordableEncodedFrame>* sink)
+    ..
+    + {abstract} void RemoveEncodedSink(
+      rtc::VideoSinkInterface<RecordableEncodedFrame>* sink)
+}
+
+MediaSourceInterface <|-- VideoTrackSourceInterface
+VideoSourceInterface <|-- VideoTrackSourceInterface
+
+class AdaptedVideoTrackSource {
+    # AdaptedVideoTrackSource(int required_alignment)
+    ..
+    # void OnFrame(const webrtc::VideoFrame& frame)
+    ..
+    # bool AdaptFrame(...)
+    ..
+    # bool apply_rotation()
+    ..
+    # cricket::VideoAdapter* video_adapter()
+    --field--
+    - {field} cricket::VideoAdapter video_adapter_
+    ..
+    - {field} VideoBroadcaster broadcaster_
+}
+VideoTrackSourceInterface <|-- AdaptedVideoTrackSource
+
+class AndroidVideoTrackSource {
+    + void SetState(SourceState state)
+    ..
+    + ScopedJavaLocalRef<jobject> AdaptFrame(...)
+    ..
+    + void OnFrameCaptured(...)
+    ..
+    + void SetIsScreencast(JNIEnv* env, jboolean j_is_screencast)
+    --field--
+    - {field} std::atomic<SourceState> state_
+    ..
+    - {field} std::atomic<bool> is_screencast_
+    ..
+    - {field} rtc::TimestampAligner timestamp_aligner_
+    ..
+    - {field} bool align_timestamps_
+}
+AdaptedVideoTrackSource <|-- AndroidVideoTrackSource
+
+@enduml

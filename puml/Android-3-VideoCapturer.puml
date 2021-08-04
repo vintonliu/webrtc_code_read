@@ -1,0 +1,164 @@
+@startuml Android-3-VideoCapturer
+
+interface CapturerObserver {
+    + void onCapturerStarted(boolean success)
+    ..
+    + void onCapturerStopped()
+    ..
+    + void onFrameCaptured(VideoFrame frame)
+}
+
+interface VideoCapturer {
+    + void initialize(SurfaceTextureHelper , Context , CapturerObserver )
+    ..
+    + void startCapture(int width, int height, int framerate)
+    ..
+    + void stopCapture()
+    ..
+    + void changeCaptureFormat(int width, int height, int framerate)
+    ..
+    + void dispose()
+    ..
+    + boolean isScreencast()
+}
+
+interface CameraVideoCapturer {
+    + void switchCamera(CameraSwitchHandler )
+    ..
+    + void switchCamera(CameraSwitchHandler, String cameraName)
+}
+
+abstract class CameraCapturer {
+    # {abstract} void createCameraSession()
+    ..
+    - void createSessionInternal(int delayMs)
+    ..
+    - void switchCameraInternal()
+    -- field --
+    - {field} CameraEnumerator cameraEnumerator
+    ..
+    - {field} CameraSession.CreateSessionCallback createSessionCallback
+    ..
+    - {field} CameraSession.Events cameraSessionEventsHandler
+    ..
+    - {field} CapturerObserver capturerObserver
+    ..
+    - {field} CameraSession currentSession
+    ..
+    - {field} CameraSwitchHandler switchEventsHandler
+    ..
+    - {field} CameraStatistics cameraStatistics
+}
+CameraCapturer::capturerObserver *-- CapturerObserver
+CameraCapturer::cameraEnumerator *-- CameraEnumerator
+CameraCapturer::createSessionCallback *-- CameraSession.CreateSessionCallback
+CameraCapturer::cameraSessionEventsHandler *-- CameraSession.Events
+CameraCapturer::currentSession *-- CameraSession
+
+class ScreenCapturerAndroid {
+
+}
+
+class FileVideoCapturer {
+
+}
+
+VideoCapturer <|-- CameraVideoCapturer
+VideoCapturer <|-- ScreenCapturerAndroid
+VideoCapturer <|-- FileVideoCapturer
+
+CameraVideoCapturer <|-- CameraCapturer
+
+class Camera1Capturer {
+    + Camera1Capturer()
+    ..
+    # {method} void createCameraSession()
+}
+
+class Camera2Capturer {
+    + Camera2Capturer()
+    ..
+    # {method} void createCameraSession()
+}
+
+CameraCapturer <|-- Camera1Capturer
+CameraCapturer <|-- Camera2Capturer
+
+interface CameraSession {
+    + void stop()
+    ..
+    + {static} int getDeviceOrientation(Context context)
+    ..
+    + {static} VideoFrame.TextureBuffer createTextureBufferWithModifiedTransformMatrix(
+      TextureBufferImpl buffer, boolean mirror, int rotation)
+}
+
+class Camera1Session {
+    + {static} void create()
+    ..
+    - void startCapturing()
+    ..
+    - void listenForTextureFrames()
+    ..
+    - void listenForBytebufferFrames()
+    ..
+    - int getFrameOrientation()
+}
+
+class Camera2Session {
+    + {static} void create()
+    ..
+    - void start()
+    ..
+    - int getFrameOrientation()
+}
+CameraSession <|-- Camera1Session
+CameraSession <|-- Camera2Session
+
+interface CameraSession.CreateSessionCallback {
+    + void onDone(CameraSession session)
+    ..
+    + void onFailure(FailureType failureType, String error)
+}
+
+interface CameraSession.Events {
+    + void onCameraOpening()
+    ..
+    + void onCameraError(CameraSession session, String error)
+    ..
+    + void onCameraDisconnected(CameraSession session)
+    ..
+    + void onCameraClosed(CameraSession session)
+    ..
+    + void onFrameCaptured(CameraSession session, VideoFrame frame)
+}
+
+interface CameraEnumerator {
+    + String[] getDeviceNames()
+    ..
+    + boolean isFrontFacing(String deviceName)
+    ..
+    + boolean isBackFacing(String deviceName)
+    ..
+    + List<CaptureFormat> getSupportedFormats(String deviceName)
+    ..
+    + CameraVideoCapturer createCapturer(String deviceName, CameraVideoCapturer.CameraEventsHandler )
+}
+
+class Camera1Enumerator {
+    - {static} CameraInfo getCameraInfo(int index)
+    ..
+    - {static} List<CaptureFormat> getSupportedFormats(int cameraId)
+    ..
+    - {static} String getDeviceName(int index)
+}
+
+class Camera2Enumerator {
+    - {method} CameraCharacteristics getCameraCharacteristics(String deviceName)
+    ..
+    + {static} boolean isSupported(Context context)
+}
+
+CameraEnumerator <|-- Camera1Enumerator
+CameraEnumerator <|-- Camera2Enumerator
+@enduml

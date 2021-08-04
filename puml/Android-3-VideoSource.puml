@@ -1,0 +1,53 @@
+@startuml Android-3-VideoSource
+class MediaSource {
+    + MediaSource(long nativeSource)
+    ..
+    + State state()
+    ..
+    + void dispose()
+    ..
+    + long getNativeMediaSource()
+}
+note right of MediaSource: Java wrapper for a C++ MediaSourceInterface
+
+class NativeAndroidVideoTrackSource {
+    + NativeAndroidVideoTrackSource(long nativeAndroidVideoTrackSource)
+    ..
+    + void setState(boolean isLive)
+    ..
+    + VideoProcessor.FrameAdaptationParameters adaptFrame(VideoFrame frame)
+    ..
+    + void onFrameCaptured(VideoFrame frame)
+    ..
+    + void adaptOutputFormat(...)
+    ..
+    + void setIsScreencast(boolean isScreencast)
+    ..
+    - void nativeSetIsScreencast(...)
+}
+note left of NativeAndroidVideoTrackSource: a simple layer that only handles the JNI wrapping of a C++
+
+class VideoSource {
+    + VideoSource(long nativeSource)
+    ..
+    + void adaptOutputFormat(int width, int height, int fps)
+    ..
+    + void setIsScreencast(boolean isScreencast)
+    ..
+    + void setVideoProcessor(@Nullable VideoProcessor newVideoProcessor)
+    ..
+    + CapturerObserver getCapturerObserver()
+    ..
+    + long getNativeVideoTrackSource()
+    ..
+    + void dispose()
+    --field--
+    - {field} NativeAndroidVideoTrackSource nativeAndroidVideoTrackSource
+    ..
+    - {field} CapturerObserver capturerObserver
+}
+note right of VideoSource: Java wrapper of native AndroidVideoTrackSource
+
+MediaSource <|-- VideoSource
+VideoSource::nativeAndroidVideoTrackSource *-- NativeAndroidVideoTrackSource
+@enduml

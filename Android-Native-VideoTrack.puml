@@ -1,0 +1,107 @@
+@startuml Android-Native-VideoTrack
+abstract class RefCountInterface {
+    + {abstract} void AddRef()
+    ..
+    + {abstract} RefCountReleaseStatus Release()
+}
+
+abstract class NotifierInterface {
+    + {abstract} void RegisterObserver(ObserverInterface* observer)
+    ..
+    + {abstract} void UnregisterObserver(ObserverInterface* observer)
+}
+
+abstract class ObserverInterface {
+    + {abstract} void OnChanged()
+}
+
+abstract class MediaStreamTrackInterface {
+    + {abstract} std::string kind()
+    ..
+    + {abstract} bool set_enabled(bool enable)
+    ..
+    + {abstract} bool enabled()
+    ..
+    + {abstract} TrackState state()
+}
+
+RefCountInterface <|-- MediaStreamTrackInterface
+NotifierInterface <|-- MediaStreamTrackInterface
+
+abstract class VideoSourceInterface<<VideoFrame>> {
+    + {abstract} void AddOrUpdateSink(VideoSinkInterface<VideoFrameT>* sink,
+    const VideoSinkWants& wants)
+    ..
+    + {abstract} void RemoveSink(VideoSinkInterface<VideoFrameT>* sink)
+}
+
+class VideoTrackInterface {
+    + VideoTrackSourceInterface* GetSource()
+    ..
+    + void set_content_hint(ContentHint hint)
+    ..
+    + ContentHint content_hint()
+}
+
+MediaStreamTrackInterface <|-- VideoTrackInterface
+VideoSourceInterface <|-- VideoTrackInterface
+
+class Notifier <<VideoTrackInterface>> {
+    + void RegisterObserver(ObserverInterface* observer)
+    ..
+    + void UnregisterObserver(ObserverInterface* observer)
+    ..
+    + void FireOnChanged()
+    -- field --
+    # {field} std::list<ObserverInterface*> observers_
+}
+
+class MediaStreamTrack {
+    + MediaStreamTrackInterface::TrackState state()
+    ..
+    + bool enabled()
+    ..
+    + bool set_enabled(bool enable)
+    ..
+    # bool set_state(MediaStreamTrackInterface::TrackState new_state)
+    --field--
+    - {field} bool enabled_
+    - {field} std::string id_;
+    - {field} MediaStreamTrackInterface::TrackState state_
+}
+VideoTrackInterface <|-- Notifier
+Notifier <|-- MediaStreamTrack
+
+class VideoSourceBase {
+    # SinkPair* FindSinkPair(const VideoSinkInterface<webrtc::VideoFrame>* sink)
+    --field--
+    - {field} std::vector<SinkPair> sinks_
+}
+VideoSourceInterface <|-- VideoSourceBase
+
+class VideoTrack {
+    + {static} static rtc::scoped_refptr<VideoTrack> Create(...)
+    ..
+    + void AddOrUpdateSink(rtc::VideoSinkInterface<VideoFrame>* sink,
+                       const rtc::VideoSinkWants& wants)
+    ..
+    + void RemoveSink(rtc::VideoSinkInterface<VideoFrame>* sink)
+    ..
+    + VideoTrackSourceInterface* GetSource()
+    ..
+    + ContentHint content_hint()
+    ..
+    + void set_content_hint(ContentHint hint)
+    ..
+    + bool set_enabled(bool enable)
+    ..
+    + std::string kind()
+    ..
+    - OnChanged()
+    --field--
+    rtc::scoped_refptr<VideoTrackSourceInterface> video_source_
+}
+MediaStreamTrack <|-- VideoTrack
+VideoSourceBase <|-- VideoTrack
+ObserverInterface <|-- VideoTrack
+@enduml
