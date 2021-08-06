@@ -34,7 +34,7 @@ public void createPeerConnectionFactory(PeerConnectionFactory.Options options) {
     executor.execute(() -> createPeerConnectionFactoryInternal(options));
 }
 
-createPeerConnectionFactoryInternal() {
+private void createPeerConnectionFactoryInternal(PeerConnectionFactory.Options options) {
     /* 创建音频设备模块 */
     final AudioDeviceModule adm = createJavaAudioDevice();
 
@@ -159,6 +159,7 @@ JNI_PeerConnectionFactory_CreatePeerConnectionFactory(
       reinterpret_cast<AudioDeviceModule*>(native_audio_device_module),
       TakeOwnershipOfRefPtr<AudioEncoderFactory>(native_audio_encoder_factory),
       TakeOwnershipOfRefPtr<AudioDecoderFactory>(native_audio_decoder_factory),
+      // 视频编码器及解码器工厂类对象
       jencoder_factory, jdecoder_factory,
       // 创建音频增强处理对象
       audio_processor ? audio_processor : CreateAudioProcessing(),
@@ -1498,6 +1499,7 @@ public CameraCapturer(String cameraName, @Nullable CameraEventsHandler eventsHan
 ### 3.2 创建 VideoSource
 1. 创建 Java 层 VideoSource，由 PeerConnectionClient.createVideoTrack() 内调用。
    
+
 ![Android-3-VideoSource](https://gitee.com/vintonliu/PicBed/raw/master/webrtc/Android-3-VideoSource.png)
 <center> Java 层 VideoSource 类图 </center>
 
@@ -2849,3 +2851,320 @@ Camera1Session/Camera2Session --> (CameraCapturer.java) CameraSession.Events.onF
 // 分支2：视频编码
 --> (video/video_stream_encoder.cc) VideoStreamEncoder::OnFrame(VideoFrame)
 ```
+
+## 4 视频编解码器
+
+```java
+// examples/androidapp/src/org/appspot/apprtc/PeerConnectionClient.java
+private void createPeerConnectionFactoryInternal(PeerConnectionFactory.Options options) {
+  ...
+
+  /* 创建视频编解码工厂, 软编或硬编 */
+  if (peerConnectionParameters.videoCodecHwAcceleration) {
+    /* 硬编+软编 */
+    encoderFactory = new DefaultVideoEncoderFactory(
+      rootEglBase.getEglBaseContext(), true /* enableIntelVp8Encoder */, enableH264HighProfile);
+    /* 硬解 + 软解 */
+    decoderFactory = new DefaultVideoDecoderFactory(rootEglBase.getEglBaseContext());
+  } else {
+    /* 软编 */
+    encoderFactory = new SoftwareVideoEncoderFactory();
+    /* 软解 */
+    decoderFactory = new SoftwareVideoDecoderFactory();
+  }
+  /** 创建 PeerConnectionFactory */
+  factory = PeerConnectionFactory.builder()
+                  .setOptions(options)
+                  .setAudioDeviceModule(adm)
+                  .setVideoEncoderFactory(encoderFactory)
+                  .setVideoDecoderFactory(decoderFactory)
+                  .createPeerConnectionFactory();
+    Log.d(TAG, "Peer connection factory created.");
+    ...
+}
+```
+
+
+
+### 4.1 视频编码器
+#### 4.1.1 类图
+
+Android 端视频编码器工厂类为 DefaultVideoEncoderFactory/SoftwareVideoEncoderFactory，其中 DefaultVideoEncoderFactory 创建视频硬编+软编，而 SoftwareVideoEncoderFactory 为VP8或VP9软编。Java 层视频编码器工厂类会传入到Native 层，在Native层通过相应的 VideoEncoderFactoryWrapper 类保存，该 VideoEncoderFactoryWrapper 类将作为Native层 PeerConnectionFactory 的外部视频编码器工厂类，之后视频编码器的创建将通过该 Wrapper 类回调Java层工厂类实例接口完成。
+
+![Android-Java-VideoEncoder-class](https://gitee.com/vintonliu/PicBed/raw/master/uPic/Android-Java-VideoEncoder-class.png)
+
+<center>Java 层视频编码器类图</center>
+
+<img src="https://gitee.com/vintonliu/PicBed/raw/master/uPic/Native_VideoEncoder.png" alt="Native_VideoEncoder" style="zoom:100%;" />
+
+<center>Native 层视频编码器工厂类图</center>
+
+#### 4.1.2 编码器工厂创建
+Java 层代码:
+
+```java
+// sdk/android/api/org/webrtc/DefaultVideoEncoderFactory.java
+/** 默认创建视频软编工厂类 */
+private final VideoEncoderFactory softwareVideoEncoderFactory = new SoftwareVideoEncoderFactory();
+/** Create encoder factory using default hardware encoder factory. */
+public DefaultVideoEncoderFactory(
+    EglBase.Context eglContext, boolean enableIntelVp8Encoder, boolean enableH264HighProfile) {
+    /** 创建视频硬编工厂类 */
+    this.hardwareVideoEncoderFactory =
+        new HardwareVideoEncoderFactory(eglContext, enableIntelVp8Encoder, enableH264HighProfile);
+}
+```
+
+Native 层代码：
+
+```c++
+// sdk/android/src/jni/pc/peer_connection_factory.cc
+static ScopedJavaLocalRef<jobject>
+JNI_PeerConnectionFactory_CreatePeerConnectionFactory(
+    JNIEnv* jni,
+    const JavaParamRef<jobject>& jcontext,
+    const JavaParamRef<jobject>& joptions,
+    jlong native_audio_device_module,
+    jlong native_audio_encoder_factory,
+    jlong native_audio_decoder_factory,
+    const JavaParamRef<jobject>& jencoder_factory,
+    const JavaParamRef<jobject>& jdecoder_factory,
+    jlong native_audio_processor,
+    jlong native_fec_controller_factory,
+    jlong native_network_controller_factory,
+    jlong native_network_state_predictor_factory,
+    jlong native_media_transport_factory,
+    jlong native_neteq_factory) {
+  ...
+  
+  // 创建 Native 层视频编码及解码器工厂类
+  // jencoder_factory 为 Java 层视频编码器工厂类实例
+  media_dependencies.video_encoder_factory =
+      absl::WrapUnique(CreateVideoEncoderFactory(jni, jencoder_factory));
+  // jdecoder_factory 为Java层视频解码器工厂类实例
+  media_dependencies.video_decoder_factory =
+      absl::WrapUnique(CreateVideoDecoderFactory(jni, jdecoder_factory));
+  
+  ...
+    
+}
+
+// sdk/android/src/jni/pc/video.cc
+VideoEncoderFactory* CreateVideoEncoderFactory(
+    JNIEnv* jni,
+    const JavaRef<jobject>& j_encoder_factory) {
+  return IsNull(jni, j_encoder_factory)
+             ? nullptr
+    					/* 创建视频编码器工厂 wrapper 类 */
+             : new VideoEncoderFactoryWrapper(jni, j_encoder_factory);
+}
+
+// sdk/android/src/jni/video_encoder_factory_wrapper.cc
+VideoEncoderFactoryWrapper::VideoEncoderFactoryWrapper(
+    JNIEnv* jni,
+    const JavaRef<jobject>& encoder_factory)
+  	// 保存 Java 层视频编码器工厂实例
+    : encoder_factory_(jni, encoder_factory) {
+  // 获取支持的视频编码器
+  const ScopedJavaLocalRef<jobjectArray> j_supported_codecs =
+      Java_VideoEncoderFactory_getSupportedCodecs(jni, encoder_factory);
+  // 将 java层数组转换成Native层Vector
+  supported_formats_ = JavaToNativeVector<SdpVideoFormat>(
+      jni, j_supported_codecs, &VideoCodecInfoToSdpVideoFormat);
+  // 获取 支持的编码器
+  const ScopedJavaLocalRef<jobjectArray> j_implementations =
+      Java_VideoEncoderFactory_getImplementations(jni, encoder_factory);
+  implementations_ = JavaToNativeVector<SdpVideoFormat>(
+      jni, j_implementations, &VideoCodecInfoToSdpVideoFormat);
+}
+```
+
+#### 4.1.3 创建视频编码器
+根据代码流程，视频编码器是在第一帧视频编码的时候创建的，而不是在创建视频流的时候。
+
+<img src="https://gitee.com/vintonliu/PicBed/raw/master/uPic/Video-Encoder-Create.png" alt="Video-Encoder-Create" style="zoom:80%;" />
+
+1. 创建视频流编码器；
+
+```c++
+// video/video_send_stream.cc
+VideoSendStream::VideoSendStream(
+  ...
+  VideoSendStream::Config config,
+  VideoEncoderConfig encoder_config,
+  ...
+) {
+  ...
+    
+  // 1. 创建视频流编码器
+  video_stream_encoder_ =
+      CreateVideoStreamEncoder(clock, task_queue_factory, num_cpu_cores,
+                               &stats_proxy_, config_.encoder_settings);
+  ...
+  
+  // 2. 设置 VideoSendStreamImpl 为视频编码后的数据接收端
+  send_stream_.reset(new VideoSendStreamImpl(
+            ...
+            video_stream_encoder_.get(),
+    				...
+  					);
+                     
+  ...
+  // 3. 配置视频编码器，但条件不足，不执行创建
+  ReconfigureVideoEncoder(std::move(encoder_config));
+}
+                     
+void VideoSendStream::ReconfigureVideoEncoder(VideoEncoderConfig config) {
+  ...
+  video_stream_encoder_->ConfigureEncoder(
+      std::move(config),
+      config_.rtp.max_packet_size - CalculateMaxHeaderSize(config_.rtp));
+}
+```
+
+2. 设置视频编码数据接收端。*VideoSendStreamImpl* 继承了编码数据回调的类 *VideoStreamEncoderInterface::EncoderSink* 。
+
+```c++
+// video/video_send_stream_impl.cc
+VideoSendStreamImpl::VideoSendStreamImpl(
+...
+VideoStreamEncoderInterface* video_stream_encoder,
+...
+){
+	...
+  video_stream_encoder_->SetSink(this, rotation_applied);
+  ...
+}
+```
+
+   ![EncoderSink](https://gitee.com/vintonliu/PicBed/raw/master/uPic/EncoderSink.png)
+
+3. 配置编码器
+
+   ```c++
+   // video/video_stream_encoder.cc
+   VideoStreamEncoder::VideoStreamEncoder(
+       ...
+       const VideoStreamEncoderSettings& settings,
+       ...) 
+   	: ...
+       settings_(settings), // settings_ 内保存了 VideoEncoderFactory 工厂类对象，用于创建编码器
+   	... {
+     ...
+   }
+   
+   void VideoStreamEncoder::ConfigureEncoder(VideoEncoderConfig config,
+                                             size_t max_data_payload_length) {
+     encoder_queue_.PostTask(
+         [this, config = std::move(config), max_data_payload_length]() mutable {
+           ...
+   
+           // 因为尚未创建 encoder_, 所以 pending_encoder_creation_ = true
+           pending_encoder_creation_ =
+               (!encoder_ || encoder_config_.video_format != config.video_format ||
+                max_data_payload_length_ != max_data_payload_length);
+           // 保存编码器配置
+           encoder_config_ = std::move(config);
+           max_data_payload_length_ = max_data_payload_length;
+           // 等待重新配置 encoder
+           pending_encoder_reconfiguration_ = true;
+   
+           // Reconfigure the encoder now if the encoder has an internal source or
+           // if the frame resolution is known. Otherwise, the reconfiguration is
+           // deferred until the next frame to minimize the number of
+           // reconfigurations. The codec configuration depends on incoming video
+           // frame size.
+           // last_frame_info_ 当前不存在，为空，故不执行 ReconfigureEncoder()
+           if (last_frame_info_) {
+             ReconfigureEncoder();
+           } else {
+             codec_info_ = settings_.encoder_factory->QueryVideoEncoder(
+                 encoder_config_.video_format);
+             // HasInternalSource() 当前恒为false，故也不执行 ReconfigureEncoder()
+             if (HasInternalSource()) {
+               last_frame_info_ = VideoFrameInfo(kDefaultInputPixelsWidth,
+                                                 kDefaultInputPixelsHeight, false);
+               ReconfigureEncoder();
+             }
+           }
+         });
+   }
+   
+   
+   
+   ```
+
+   
+
+4. 创建编码器并初始化
+
+   ```c++
+   // video/video_stream_encoder.cc
+   void VideoStreamEncoder::ReconfigureEncoder() {
+     ...
+     // pending_encoder_creation_ 已在 ConfigureEncoder() 中设置为 true
+     if (pending_encoder_creation_) {
+       // Destroy existing encoder instance before creating a new one. Otherwise
+       // attempt to create another instance will fail if encoder factory
+       // supports only single instance of encoder of given type.
+       encoder_.reset();
+   		
+       // 通过编码器工厂类创建指定 format 的编码器
+       encoder_ = settings_.encoder_factory->CreateVideoEncoder(
+           encoder_config_.video_format);
+       
+       ...
+   
+       // 获取编码器参数
+       codec_info_ = settings_.encoder_factory->QueryVideoEncoder(
+           encoder_config_.video_format);
+   
+       encoder_reset_required = true;
+     }
+     
+     ...
+     
+      bool success = true;
+     if (encoder_reset_required) {
+       // 若之前已初始化同一编码器，需先去初始化编码器
+       ReleaseEncoder();
+       const size_t max_data_payload_length = max_data_payload_length_ > 0
+                                                  ? max_data_payload_length_
+                                                  : kDefaultPayloadSize;
+       // 初始化编码器
+       if (encoder_->InitEncode(
+               &send_codec_,
+               VideoEncoder::Settings(settings_.capabilities, number_of_cores_,
+                                      max_data_payload_length)) != 0) {
+         RTC_LOG(LS_ERROR) << "Failed to initialize the encoder associated with "
+                              "codec type: "
+                           << CodecTypeToPayloadString(send_codec_.codecType)
+                           << " (" << send_codec_.codecType << ")";
+         ReleaseEncoder();
+         success = false;
+       } else {
+         encoder_initialized_ = true;
+         // 注册编码数据回调为当前 VideoStreamEncoder 对象，编码完成后，
+         // 将回调 EncodedImageCallback::Result VideoStreamEncoder::OnEncodedImage() 接口
+         encoder_->RegisterEncodeCompleteCallback(this);
+         frame_encode_metadata_writer_.OnEncoderInit(send_codec_,
+                                                     HasInternalSource());
+       }
+   
+       ...
+     }
+     
+     ...
+   }
+   ```
+
+   
+
+### 4.2 视频解码器
+
+#### 4.2.1 类图
+
+
+
+#### 4.2.2 解码器工厂类创建
+

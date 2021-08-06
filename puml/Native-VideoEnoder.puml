@@ -1,0 +1,37 @@
+@startuml Native_VideoEncoder
+title Android 视频编码器工厂类图
+
+abstract class VideoEncoderFactory {
+    + std::vector<SdpVideoFormat> GetSupportedFormats()
+    ..
+    + virtual std::vector<SdpVideoFormat> GetImplementations()
+    ..
+    + CodecInfo QueryVideoEncoder(const SdpVideoFormat& format)
+    ..
+    + std::unique_ptr<VideoEncoder> CreateVideoEncoder(
+      const SdpVideoFormat& format)
+    ..
+    + std::unique_ptr<EncoderSelectorInterface> GetEncoderSelector()
+}
+
+class VideoEncoderFactoryWrapper {
+    + std::vector<SdpVideoFormat> GetSupportedFormats()
+    ..
+    + virtual std::vector<SdpVideoFormat> GetImplementations()
+    ..
+    + CodecInfo QueryVideoEncoder(const SdpVideoFormat& format)
+    ..
+    + std::unique_ptr<VideoEncoder> CreateVideoEncoder(
+      const SdpVideoFormat& format)
+    ..
+    + std::unique_ptr<EncoderSelectorInterface> GetEncoderSelector()
+    --
+    - ScopedJavaGlobalRef<jobject> encoder_factory_
+    ..
+    - std::vector<SdpVideoFormat> supported_formats_
+    ..
+    - std::vector<SdpVideoFormat> implementations_
+}
+
+VideoEncoderFactory <|-- VideoEncoderFactoryWrapper
+@enduml

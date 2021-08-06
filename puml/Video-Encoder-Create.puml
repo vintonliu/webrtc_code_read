@@ -1,0 +1,60 @@
+@startuml Video-Encoder-Create
+title <font size=24><b>视频编码器创建时序
+
+autonumber "<b>[S00]"
+skinparam style strictuml
+skinparam sequenceArrowThickness 1
+skinparam roundcorner 20
+skinparam maxmessagesize 100
+
+participant "Call" as Call
+participant "VideoSendStream" as VSS
+participant "VideoStreamEncoder" as VSE
+participant "VideoSendStreamImpl" as VSSI
+participant "VideoEncoderFactory" as VEF
+participant "VideoEncoder" as VE
+
+Call -> VSS ++ : new
+VSS -> VSE ++ : new
+VSS -> VSSI ++ : new
+VSSI -> VSE -- : SetSink(EncoderSink*)
+VSS -> VSE -- : ConfigureEncoder()
+note right : 1. 配置编码器，但不创建
+VSE --
+
+||45||
+
+autonumber "<font color=blue><b>E00 "
+hnote over VSE : 2. 收到待编码视频帧，开始视频编码
+?-> VSE ++ : OnFrame()
+
+VSE -> VSE ++ #DarkSalmon : MaybeEncodeVideoFrame()
+
+VSE -> VSE ++ #FFBBBB : ReconfigureEncoder()
+note left : 3. 创建及初始化编码器
+VSE -> VEF ++ : CreateVideoEncoder()
+VEF -> VE ++ : new
+VEF --> VSE : VideoEncoder
+VSE -> VEF : QueryVideoEncoder()
+VEF --> VSE -- : CodecInfo
+VSE -> VE : InitEncode()
+VE --> VSE : success ?
+VSE -> VE : RegisterEncodeCompleteCallback(this) //注册编码数据回调
+VE--
+
+VSE -> VSSI ++ : OnEncoderConfigurationChanged()
+VSSI --> VSE -- : void
+VSE --
+
+VSE -> VSE ++ #AABAAA : EncodeVideoFrame()
+note left : 4. 开始编码
+VSE -> VE ++ : Encode()
+VE -> VSE : OnEncodedImage()
+VSE -> VSSI ++ : OnEncodedImage()
+VSSI ->] : <<对编码数据组包并发送>>
+VSSI --> VSE -- : Result
+VE --> VSE -- : encode_status
+VSE--
+VSE--
+VSE--
+@enduml

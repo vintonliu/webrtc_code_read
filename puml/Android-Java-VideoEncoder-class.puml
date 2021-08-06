@@ -1,0 +1,164 @@
+@startuml Android-Java-VideoEncoder-class
+
+interface VideoEncoderFactory {
+    @CalledByNative VideoEncoder createEncoder(VideoCodecInfo info)
+    ..
+    @CalledByNative VideoCodecInfo[] getSupportedCodecs()
+    ..
+    @CalledByNative VideoCodecInfo[] getImplementations()
+    ..
+    @CalledByNative VideoEncoderSelector getEncoderSelector()
+}
+
+' interface VideoEncoderFactory.VideoEncoderSelector {
+'     + void onCurrentEncoder(VideoCodecInfo info)
+'     ..
+'     + VideoCodecInfo onAvailableBitrate(int kbps)
+'     ..
+'     + VideoCodecInfo onEncoderBroken()
+' }
+
+' note right of VideoEncoderFactory.VideoEncoderSelector: 被@CalledByNative 注解，由Native层回调
+
+interface DefaultVideoEncoderFactory {
+    VideoEncoder createEncoder(VideoCodecInfo info)
+    ..
+    VideoCodecInfo[] getSupportedCodecs()
+    --
+    - {field} VideoEncoderFactory hardwareVideoEncoderFactory
+    ..
+    - {field} VideoEncoderFactory softwareVideoEncoderFactory
+}
+
+note top of DefaultVideoEncoderFactory: 合并了硬编和软编的辅助类
+VideoEncoderFactory <|-- DefaultVideoEncoderFactory
+
+DefaultVideoEncoderFactory::hardwareVideoEncoderFactory *-- HardwareVideoEncoderFactory
+DefaultVideoEncoderFactory::softwareVideoEncoderFactory *-- SoftwareVideoEncoderFactory
+
+interface HardwareVideoEncoderFactory {
+    VideoEncoder createEncoder(VideoCodecInfo info)
+    ..
+    VideoCodecInfo[] getSupportedCodecs()
+    ..
+
+}
+
+interface SoftwareVideoEncoderFactory {
+    VideoEncoder createEncoder(VideoCodecInfo info)
+    ..
+    VideoCodecInfo[] getSupportedCodecs()
+}
+
+VideoEncoderFactory <|-- HardwareVideoEncoderFactory
+VideoEncoderFactory <|-- SoftwareVideoEncoderFactory
+
+interface VideoEncoder {
+    @CalledByNative long createNativeVideoEncoder()
+    ..
+    @CalledByNative boolean isHardwareEncoder()
+    ..
+    @CalledByNative VideoCodecStatus initEncode(Settings settings, Callback encodeCallback)
+    ..
+    @CalledByNative VideoCodecStatus release()
+    ..
+    @CalledByNative VideoCodecStatus encode(VideoFrame frame, EncodeInfo info)
+    ..
+    @CalledByNative VideoCodecStatus setRateAllocation(BitrateAllocation allocation, int framerate)
+    ..
+    @CalledByNative ScalingSettings getScalingSettings()
+    ..
+    @CalledByNative ResolutionBitrateLimits[] getResolutionBitrateLimits()
+    ..
+    @CalledByNative String getImplementationName()
+}
+
+' class VideoEncoder.Settings {
+'     + {field} int numberOfCores
+'     ..
+'     + {field} int width
+'     ..
+'     + {field} int height
+'     ..
+'     + {field} int startBitrate
+'     ..
+'     + {field} int maxFramerate
+'     ..
+'     + {field} int numberOfSimulcastStreams
+'     ..
+'     + {field} boolean automaticResizeOn
+'     ..
+'     + {field} Capabilities capabilities
+' }
+
+' interface VideoEncoder.Callback {
+'     void onEncodedFrame(EncodedImage frame, CodecSpecificInfo info)
+'     ..
+' }
+
+
+interface HardwareVideoEncoder {
+    VideoCodecStatus initEncode(Settings settings, Callback encodeCallback)
+    ..
+    VideoCodecStatus release()
+    ..
+    VideoCodecStatus encode(VideoFrame frame, EncodeInfo info)
+    ..
+    VideoCodecStatus setRateAllocation(BitrateAllocation allocation, int framerate)
+    ..
+    ScalingSettings getScalingSettings()
+    ..
+    ResolutionBitrateLimits[] getResolutionBitrateLimits()
+    ..
+    String getImplementationName()
+}
+
+VideoEncoder <|-- HardwareVideoEncoder
+
+interface WrappedNativeVideoEncoder {
+    + {abstract} long createNativeVideoEncoder()
+    ..
+    + {abstract} boolean isHardwareEncoder()
+}
+
+VideoEncoder <|-- WrappedNativeVideoEncoder
+
+class VideoEncoderFallback {
+    + long createNativeVideoEncoder()
+    ..
+    + boolean isHardwareEncoder()
+    --
+    - {field} VideoEncoder fallback
+    ..
+    - {field} VideoEncoder primary
+}
+note left of VideoEncoderFallback: 组合视频编码器，在主编码器(硬编)出现故障时退回到辅助编码器(软编)
+WrappedNativeVideoEncoder <|-- VideoEncoderFallback
+
+VideoEncoderFallback::primary *-- HardwareVideoEncoder
+VideoEncoderFallback::fallback *-- LibvpxVp8Encoder
+VideoEncoderFallback::fallback *-- LibvpxVp9Encoder
+
+class LibvpxVp8Encoder {
+    + long createNativeVideoEncoder()
+    ..
+    + boolean isHardwareEncoder()
+    ..
+    {static} native long nativeCreateEncoder()
+}
+
+class LibvpxVp9Encoder {
+    + long createNativeVideoEncoder()
+    ..
+    + boolean isHardwareEncoder()
+    ..
+    {static} native long nativeCreateEncoder()
+    ..
+    {static} native boolean nativeIsSupported()
+}
+
+WrappedNativeVideoEncoder <|-- LibvpxVp8Encoder
+WrappedNativeVideoEncoder <|-- LibvpxVp9Encoder
+
+DefaultVideoEncoderFactory::createEncoder *-- VideoEncoder
+@enduml

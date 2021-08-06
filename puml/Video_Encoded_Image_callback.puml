@@ -1,0 +1,34 @@
+@startuml EncoderSink
+class EncodedImageCallback {
+    + Result OnEncodedImage(const EncodedImage& , const CodecSpecificInfo* , const RTPFragmentationHeader* )
+    ..
+    + void OnDroppedFrame(DropReason reason)
+}
+
+class EncoderSink {
+    + void OnEncoderConfigurationChanged(std::vector<VideoStream> streams, bool is_svc, 
+    VideoEncoderConfig::ContentType , int min_transmit_bitrate_bps)
+    ..
+}
+
+EncodedImageCallback <|-- EncoderSink
+
+class VideoSendStreamImpl {
+    + Result OnEncodedImage(const EncodedImage& , const CodecSpecificInfo* , const RTPFragmentationHeader* )
+    ..
+    + void OnDroppedFrame(DropReason reason)
+    ..
+    + void OnEncoderConfigurationChanged(std::vector<VideoStream> streams, bool is_svc, 
+    VideoEncoderConfig::ContentType , int min_transmit_bitrate_bps)
+}
+
+EncoderSink <|-- VideoSendStreamImpl
+
+class VideoStreamEncoder {
+    + void SetSink(EncoderSink* sink, bool rotation_applied)
+    --
+    - EncoderSink* sink_
+}
+
+VideoStreamEncoder::sink_ *-- VideoSendStreamImpl
+@enduml
