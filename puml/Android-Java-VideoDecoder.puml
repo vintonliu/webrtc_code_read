@@ -1,0 +1,204 @@
+@startuml Java-VideoDecoder
+title Android端视频解码器类图
+
+interface VideoDecoderFactory {
+    + @CalledByNative default VideoDecoder createDecoder(VideoCodecInfo info)
+    ..
+    + @CalledByNative default VideoCodecInfo[] getSupportedCodecs()
+}
+
+class MediaCodecVideoDecoderFactory {
+    + VideoDecoder createDecoder(VideoCodecInfo info)
+    ..
+    + VideoCodecInfo[] getSupportedCodecs()
+    --
+    - MediaCodecInfo findCodecForType(VideoCodecMimeType type)
+    ..
+    - boolean isSupportedCodec(MediaCodecInfo info, VideoCodecMimeType type)
+    ..
+    - boolean isCodecAllowed(MediaCodecInfo info)
+    ..
+    - boolean isH264HighProfileSupported(MediaCodecInfo info)
+    --
+    - EglBase.Context sharedContext
+    ..
+    - Predicate<MediaCodecInfo> codecAllowedPredicate
+}
+note left of MediaCodecVideoDecoderFactory: 硬解码器
+
+class SoftwareVideoDecoderFactory {
+    + VideoDecoder createDecoder(VideoCodecInfo info)
+    ..
+    + VideoCodecInfo[] getSupportedCodecs()
+    --
+    - {static} VideoCodecInfo[] supportedCodecs()
+}
+note bottom of SoftwareVideoDecoderFactory: 软解：VP8/VP9
+
+class DefaultVideoDecoderFactory {
+    + VideoDecoder createDecoder(VideoCodecInfo info)
+    ..
+    + VideoCodecInfo[] getSupportedCodecs()
+    --
+    - VideoDecoderFactory hardwareVideoDecoderFactory
+    ..
+    - VideoDecoderFactory softwareVideoDecoderFactory
+    ..
+    - VideoDecoderFactory platformSoftwareVideoDecoderFactory
+}
+note top of DefaultVideoDecoderFactory : 辅助类，合并了硬解和软解
+
+VideoDecoderFactory <|-- MediaCodecVideoDecoderFactory
+VideoDecoderFactory <|-- DefaultVideoDecoderFactory
+
+class HardwareVideoDecoderFactory {
+    ..
+    - Predicate<MediaCodecInfo> defaultAllowedPredicate
+}
+
+MediaCodecVideoDecoderFactory <|-- HardwareVideoDecoderFactory
+
+class PlatformSoftwareVideoDecoderFactory {
+    ..
+    - Predicate<MediaCodecInfo> defaultAllowedPredicate
+}
+
+MediaCodecVideoDecoderFactory <|-- PlatformSoftwareVideoDecoderFactory
+
+VideoDecoderFactory <|-- SoftwareVideoDecoderFactory
+
+DefaultVideoDecoderFactory::softwareVideoDecoderFactory *-- SoftwareVideoDecoderFactory
+DefaultVideoDecoderFactory::hardwareVideoDecoderFactory *-- HardwareVideoDecoderFactory
+DefaultVideoDecoderFactory::platformSoftwareVideoDecoderFactory *-- PlatformSoftwareVideoDecoderFactory
+
+interface VideoDecoder {
+    + @CalledByNative default long createNativeVideoDecoder()
+    ..
+    + @CalledByNative VideoCodecStatus initDecode(Settings settings, Callback decodeCallback)
+    ..
+    + @CalledByNative VideoCodecStatus release()
+    ..
+    + @CalledByNative VideoCodecStatus decode(EncodedImage frame, DecodeInfo info)
+    ..
+    + @CalledByNative boolean getPrefersLateDecoding()
+    ..
+    + @CalledByNative String getImplementationName()
+}
+note top of VideoDecoder: 视频解码器基类
+VideoDecoderFactory::createDecoder *-- VideoDecoder
+
+abstract class WrappedNativeVideoDecoder {
+    + {abstract} long createNativeVideoDecoder()
+    ..
+    + VideoCodecStatus initDecode(Settings settings, Callback decodeCallback)
+    ..
+    + VideoCodecStatus release()
+    ..
+    + VideoCodecStatus decode(EncodedImage frame, DecodeInfo info)
+    ..
+    + boolean getPrefersLateDecoding()
+    ..
+    + String getImplementationName()
+}
+
+VideoDecoder <|-- WrappedNativeVideoDecoder
+
+class LibvpxVp8Decoder {
+    + long createNativeVideoDecoder()
+    --
+    - long nativeCreateDecoder()
+}
+note bottom of LibvpxVp8Decoder: VP8 软解
+WrappedNativeVideoDecoder <|-- LibvpxVp8Decoder
+
+class LibvpxVp9Decoder {
+    + long createNativeVideoDecoder()
+    --
+    - {static} native long nativeCreateDecoder()
+    ..
+    - {static} native boolean nativeIsSupported()
+}
+note bottom of LibvpxVp9Decoder: VP9 软解
+WrappedNativeVideoDecoder <|-- LibvpxVp9Decoder
+
+class AndroidVideoDecoder {
+    + VideoCodecStatus initDecode(Settings settings, Callback callback)
+    ..
+    + VideoCodecStatus release()
+    ..
+    + VideoCodecStatus decode(EncodedImage frame, DecodeInfo info)
+    ..
+    + boolean getPrefersLateDecoding()
+    ..
+    + String getImplementationName()
+    --
+    - VideoCodecStatus initDecodeInternal(int width, int height)
+    ..
+    - VideoCodecStatus releaseInternal()
+    ..
+    - VideoCodecStatus reinitDecode(int newWidth, int newHeight)
+    ..
+    - void deliverDecodedFrame()
+    ..
+    - void onFrame(VideoFrame frame)
+    --
+    - MediaCodecWrapperFactory mediaCodecWrapperFactory
+    ..
+    - MediaCodecWrapper codec
+}
+note bottom of AndroidVideoDecoder: 视频硬解码器
+VideoDecoder <|-- AndroidVideoDecoder
+
+interface MediaCodecWrapperFactory {
+    - MediaCodecWrapper createByCodecName(String name)
+    ..
+}
+
+class MediaCodecWrapperFactoryImpl {
+    - MediaCodecWrapper createByCodecName(String name)
+    ..
+}
+MediaCodecWrapperFactory <|-- MediaCodecWrapperFactoryImpl
+
+AndroidVideoDecoder::mediaCodecWrapperFactory *-- MediaCodecWrapperFactoryImpl
+
+interface MediaCodecWrapper {
+    + void configure(MediaFormat format, Surface surface, MediaCrypto crypto, int flags)
+    ..
+    + void start()
+    ..
+    + void flush()
+    ..
+    + void stop()
+    ..
+    + void release()
+    ..
+    + int dequeueInputBuffer(long timeoutUs)
+    ..
+    + void queueInputBuffer(int index, int offset, int size, long presentationTimeUs, int flags)
+    ..
+    + int dequeueOutputBuffer(MediaCodec.BufferInfo info, long timeoutUs)
+    ..
+    + void releaseOutputBuffer(int index, boolean render)
+    ..
+    + MediaFormat getOutputFormat()
+    ..
+    + ByteBuffer[] getInputBuffers()
+    ..
+    + ByteBuffer[] getOutputBuffers()
+    ..
+    + Surface createInputSurface()
+    ..
+    + void setParameters(Bundle params)
+}
+
+class MediaCodecWrapperImpl {
+    + MediaCodecWrapperImpl(MediaCodec mediaCodec)
+    --
+    - MediaCodec mediaCodec
+}
+note top of MediaCodecWrapper: MediaCodec 封装类
+MediaCodecWrapper <|-- MediaCodecWrapperImpl
+
+AndroidVideoDecoder::codec *-- MediaCodecWrapperImpl
+@enduml

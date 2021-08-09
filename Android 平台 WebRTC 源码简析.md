@@ -3449,7 +3449,7 @@ VideoEncoderWrapper::VideoEncoderWrapper(JNIEnv* jni,
 
 #### 4.2.1 类图
 
-
+<img src="https://gitee.com/vintonliu/PicBed/raw/master/uPic/Java-VideoDecoder.png" alt="Java-VideoDecoder" style="zoom:80%;" />
 
 #### 4.2.2 解码器工厂类创建
 
