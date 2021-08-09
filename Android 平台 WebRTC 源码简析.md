@@ -2891,11 +2891,11 @@ private void createPeerConnectionFactoryInternal(PeerConnectionFactory.Options o
 
 Android 端视频编码器工厂类为 DefaultVideoEncoderFactory/SoftwareVideoEncoderFactory，其中 DefaultVideoEncoderFactory 创建视频硬编+软编，而 SoftwareVideoEncoderFactory 为VP8或VP9软编。Java 层视频编码器工厂类会传入到Native 层，在Native层通过相应的 VideoEncoderFactoryWrapper 类保存，该 VideoEncoderFactoryWrapper 类将作为Native层 PeerConnectionFactory 的外部视频编码器工厂类，之后视频编码器的创建将通过该 Wrapper 类回调Java层工厂类实例接口完成。
 
-![Android-Java-VideoEncoder-class](https://gitee.com/vintonliu/PicBed/raw/master/uPic/Android-Java-VideoEncoder-class.png)
+![Android-Java-VideoEncoder-class](https://gitee.com/vintonliu/PicBed/raw/master/webrtc/Android-Java-VideoEncoder-class.png)
 
 <center>Java 层视频编码器类图</center>
 
-<img src="https://gitee.com/vintonliu/PicBed/raw/master/uPic/Native_VideoEncoder.png" alt="Native_VideoEncoder" style="zoom:100%;" />
+<img src="https://gitee.com/vintonliu/PicBed/raw/master/webrtc/Native_VideoEncoder.png" alt="Native_VideoEncoder" style="zoom:100%;" />
 
 <center>Native 层视频编码器工厂类图</center>
 
@@ -2982,7 +2982,7 @@ VideoEncoderFactoryWrapper::VideoEncoderFactoryWrapper(
 #### 4.1.3 创建视频编码器
 根据代码流程，视频编码器是在第一帧视频编码的时候创建的，而不是在创建视频流的时候。
 
-<img src="https://gitee.com/vintonliu/PicBed/raw/master/uPic/Video-Encoder-Create.png" alt="Video-Encoder-Create" style="zoom:80%;" />
+<img src="https://gitee.com/vintonliu/PicBed/raw/master/webrtc/Video-Encoder-Create.png" alt="Video-Encoder-Create" style="zoom:80%;" />
 
 1. 创建视频流编码器；
 
@@ -3037,7 +3037,7 @@ VideoStreamEncoderInterface* video_stream_encoder,
 }
 ```
 
-   ![EncoderSink](https://gitee.com/vintonliu/PicBed/raw/master/uPic/EncoderSink.png)
+   ![EncoderSink](https://gitee.com/vintonliu/PicBed/raw/master/webrtc/EncoderSink.png)
 
 3. 配置编码器
 
@@ -3441,7 +3441,7 @@ VideoEncoderWrapper::VideoEncoderWrapper(JNIEnv* jni,
 
 最后，Android端视频编码器的类图大概如下:
 
-<img src="https://gitee.com/vintonliu/PicBed/raw/master/uPic/Android-Native-VideoEncoder.png" alt="Android-Native-VideoEncoder" style="zoom:80%;" />
+<img src="https://gitee.com/vintonliu/PicBed/raw/master/webrtc/Android-Native-VideoEncoder.png" alt="Android-Native-VideoEncoder" style="zoom:80%;" />
 
 
 
@@ -3449,7 +3449,7 @@ VideoEncoderWrapper::VideoEncoderWrapper(JNIEnv* jni,
 
 #### 4.2.1 类图
 
-<img src="https://gitee.com/vintonliu/PicBed/raw/master/uPic/Java-VideoDecoder.png" alt="Java-VideoDecoder" style="zoom:80%;" />
+<img src="https://gitee.com/vintonliu/PicBed/raw/master/webrtc/Java-VideoDecoder.png" alt="Java-VideoDecoder" style="zoom:80%;" />
 
 #### 4.2.2 解码器工厂类创建
 
