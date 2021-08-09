@@ -3041,124 +3041,409 @@ VideoStreamEncoderInterface* video_stream_encoder,
 
 3. 配置编码器
 
-   ```c++
-   // video/video_stream_encoder.cc
-   VideoStreamEncoder::VideoStreamEncoder(
-       ...
-       const VideoStreamEncoderSettings& settings,
-       ...) 
-   	: ...
-       settings_(settings), // settings_ 内保存了 VideoEncoderFactory 工厂类对象，用于创建编码器
-   	... {
-     ...
-   }
-   
-   void VideoStreamEncoder::ConfigureEncoder(VideoEncoderConfig config,
-                                             size_t max_data_payload_length) {
-     encoder_queue_.PostTask(
-         [this, config = std::move(config), max_data_payload_length]() mutable {
-           ...
-   
-           // 因为尚未创建 encoder_, 所以 pending_encoder_creation_ = true
-           pending_encoder_creation_ =
-               (!encoder_ || encoder_config_.video_format != config.video_format ||
-                max_data_payload_length_ != max_data_payload_length);
-           // 保存编码器配置
-           encoder_config_ = std::move(config);
-           max_data_payload_length_ = max_data_payload_length;
-           // 等待重新配置 encoder
-           pending_encoder_reconfiguration_ = true;
-   
-           // Reconfigure the encoder now if the encoder has an internal source or
-           // if the frame resolution is known. Otherwise, the reconfiguration is
-           // deferred until the next frame to minimize the number of
-           // reconfigurations. The codec configuration depends on incoming video
-           // frame size.
-           // last_frame_info_ 当前不存在，为空，故不执行 ReconfigureEncoder()
-           if (last_frame_info_) {
-             ReconfigureEncoder();
-           } else {
-             codec_info_ = settings_.encoder_factory->QueryVideoEncoder(
-                 encoder_config_.video_format);
-             // HasInternalSource() 当前恒为false，故也不执行 ReconfigureEncoder()
-             if (HasInternalSource()) {
-               last_frame_info_ = VideoFrameInfo(kDefaultInputPixelsWidth,
-                                                 kDefaultInputPixelsHeight, false);
-               ReconfigureEncoder();
-             }
-           }
-         });
-   }
-   
-   
-   
-   ```
+```c++
+// video/video_stream_encoder.cc
+VideoStreamEncoder::VideoStreamEncoder(
+  ...
+  const VideoStreamEncoderSettings& settings,
+  ...) 
+  : ...
+    settings_(settings), // settings_ 内保存了 VideoEncoderFactory 工厂类对象，用于创建编码器
+... {
+  ...
+}
 
-   
+void VideoStreamEncoder::ConfigureEncoder(VideoEncoderConfig config,
+                                          size_t max_data_payload_length) {
+  encoder_queue_.PostTask(
+    [this, config = std::move(config), max_data_payload_length]() mutable {
+      ...
+
+        // 因为尚未创建 encoder_, 所以 pending_encoder_creation_ = true
+        pending_encoder_creation_ =
+        (!encoder_ || encoder_config_.video_format != config.video_format ||
+         max_data_payload_length_ != max_data_payload_length);
+      // 保存编码器配置
+      encoder_config_ = std::move(config);
+      max_data_payload_length_ = max_data_payload_length;
+      // 等待重新配置 encoder
+      pending_encoder_reconfiguration_ = true;
+
+      // Reconfigure the encoder now if the encoder has an internal source or
+      // if the frame resolution is known. Otherwise, the reconfiguration is
+      // deferred until the next frame to minimize the number of
+      // reconfigurations. The codec configuration depends on incoming video
+      // frame size.
+      // last_frame_info_ 当前不存在，为空，故不执行 ReconfigureEncoder()
+      if (last_frame_info_) {
+        ReconfigureEncoder();
+      } else {
+        codec_info_ = settings_.encoder_factory->QueryVideoEncoder(
+          encoder_config_.video_format);
+        // HasInternalSource() 当前恒为false，故也不执行 ReconfigureEncoder()
+        if (HasInternalSource()) {
+          last_frame_info_ = VideoFrameInfo(kDefaultInputPixelsWidth,
+                                            kDefaultInputPixelsHeight, false);
+          ReconfigureEncoder();
+        }
+      }
+    });
+}
+```
 
 4. 创建编码器并初始化
 
-   ```c++
-   // video/video_stream_encoder.cc
-   void VideoStreamEncoder::ReconfigureEncoder() {
-     ...
-     // pending_encoder_creation_ 已在 ConfigureEncoder() 中设置为 true
-     if (pending_encoder_creation_) {
-       // Destroy existing encoder instance before creating a new one. Otherwise
-       // attempt to create another instance will fail if encoder factory
-       // supports only single instance of encoder of given type.
-       encoder_.reset();
-   		
-       // 通过编码器工厂类创建指定 format 的编码器
-       encoder_ = settings_.encoder_factory->CreateVideoEncoder(
-           encoder_config_.video_format);
-       
-       ...
-   
-       // 获取编码器参数
-       codec_info_ = settings_.encoder_factory->QueryVideoEncoder(
-           encoder_config_.video_format);
-   
-       encoder_reset_required = true;
-     }
-     
-     ...
-     
-      bool success = true;
-     if (encoder_reset_required) {
-       // 若之前已初始化同一编码器，需先去初始化编码器
-       ReleaseEncoder();
-       const size_t max_data_payload_length = max_data_payload_length_ > 0
-                                                  ? max_data_payload_length_
-                                                  : kDefaultPayloadSize;
-       // 初始化编码器
-       if (encoder_->InitEncode(
-               &send_codec_,
-               VideoEncoder::Settings(settings_.capabilities, number_of_cores_,
-                                      max_data_payload_length)) != 0) {
-         RTC_LOG(LS_ERROR) << "Failed to initialize the encoder associated with "
-                              "codec type: "
-                           << CodecTypeToPayloadString(send_codec_.codecType)
-                           << " (" << send_codec_.codecType << ")";
-         ReleaseEncoder();
-         success = false;
-       } else {
-         encoder_initialized_ = true;
-         // 注册编码数据回调为当前 VideoStreamEncoder 对象，编码完成后，
-         // 将回调 EncodedImageCallback::Result VideoStreamEncoder::OnEncodedImage() 接口
-         encoder_->RegisterEncodeCompleteCallback(this);
-         frame_encode_metadata_writer_.OnEncoderInit(send_codec_,
-                                                     HasInternalSource());
-       }
-   
-       ...
-     }
-     
-     ...
-   }
-   ```
+```c++
+// video/video_stream_encoder.cc
+void VideoStreamEncoder::ReconfigureEncoder() {
+  ...
+    // pending_encoder_creation_ 已在 ConfigureEncoder() 中设置为 true
+    if (pending_encoder_creation_) {
+      // Destroy existing encoder instance before creating a new one. Otherwise
+      // attempt to create another instance will fail if encoder factory
+      // supports only single instance of encoder of given type.
+      encoder_.reset();
 
+      // 通过编码器工厂类创建指定 format 的编码器，在 Android 平台，encoder_factory指向
+      // VideoEncoderFactoryWrapper
+      encoder_ = settings_.encoder_factory->CreateVideoEncoder(
+        encoder_config_.video_format);
+
+      ...
+
+        // 获取编码器参数
+        codec_info_ = settings_.encoder_factory->QueryVideoEncoder(
+        encoder_config_.video_format);
+
+      encoder_reset_required = true;
+    }
+
+  ...
+
+    bool success = true;
+  if (encoder_reset_required) {
+    // 若之前已初始化同一编码器，需先去初始化编码器
+    ReleaseEncoder();
+    const size_t max_data_payload_length = max_data_payload_length_ > 0
+      ? max_data_payload_length_
+      : kDefaultPayloadSize;
+    // 初始化编码器
+    if (encoder_->InitEncode(
+      &send_codec_,
+      VideoEncoder::Settings(settings_.capabilities, number_of_cores_,
+                             max_data_payload_length)) != 0) {
+      RTC_LOG(LS_ERROR) << "Failed to initialize the encoder associated with "
+        "codec type: "
+        << CodecTypeToPayloadString(send_codec_.codecType)
+        << " (" << send_codec_.codecType << ")";
+      ReleaseEncoder();
+      success = false;
+    } else {
+      encoder_initialized_ = true;
+      // 注册编码数据回调为当前 VideoStreamEncoder 对象，编码完成后，
+      // 将回调 EncodedImageCallback::Result VideoStreamEncoder::OnEncodedImage() 接口
+      encoder_->RegisterEncodeCompleteCallback(this);
+      frame_encode_metadata_writer_.OnEncoderInit(send_codec_,
+                                                  HasInternalSource());
+    }
+
+    ...
+  }
+
+  ...
+}
    
+```
+
+a. 视频编码器工厂类创建视频编码器。
+
+```c++
+// sdk/android/src/jni/video_encoder_factory_wrapper.cc
+std::unique_ptr<VideoEncoder> VideoEncoderFactoryWrapper::CreateVideoEncoder(
+    const SdpVideoFormat& format) {
+  JNIEnv* jni = AttachCurrentThreadIfNeeded();
+  ScopedJavaLocalRef<jobject> j_codec_info =
+      SdpVideoFormatToVideoCodecInfo(jni, format);
+  // 通过 JNI 创建 VideoEncoder 的 Java 实例, encoder_factory_ 为 DefaultVideoEncoderFactory 的实例
+  ScopedJavaLocalRef<jobject> encoder = Java_VideoEncoderFactory_createEncoder(
+      jni, encoder_factory_, j_codec_info);
+  if (!encoder.obj())
+    return nullptr;
+  // 若是硬编，则将 Java 层硬编码实例转换为 Native 层 VideoEncoderWrapper 对象；
+  // 若是软编，则直接是简单对象指针转换，因为软编是直接创建的Native层对象
+  return JavaToNativeVideoEncoder(jni, encoder);
+}
+
+// sdk/android/generated_video_jni/VideoEncoderFactory_jni.h
+static base::android::ScopedJavaLocalRef<jobject> Java_VideoEncoderFactory_createEncoder(JNIEnv*
+    env, const base::android::JavaRef<jobject>& obj, const base::android::JavaRef<jobject>& info) {
+  jclass clazz = org_webrtc_VideoEncoderFactory_clazz(env);
+  CHECK_CLAZZ(env, obj.obj(),
+      org_webrtc_VideoEncoderFactory_clazz(env), NULL);
+
+  jni_generator::JniJavaCallContextChecked call_context;
+  call_context.Init<
+      base::android::MethodID::TYPE_INSTANCE>(
+          env,
+          clazz,
+          "createEncoder",
+          "(Lorg/webrtc/VideoCodecInfo;)Lorg/webrtc/VideoEncoder;",
+          &g_com_talk51_blitz_webrtc_VideoEncoderFactory_createEncoder);
+
+  jobject ret =
+      env->CallObjectMethod(obj.obj(),
+          call_context.base.method_id, info.obj());
+  return base::android::ScopedJavaLocalRef<jobject>(env, ret);
+}
+```
+
+b. 调用 Java 层 DefaultVideoEncoderFactory 创建视频编码器。
+```java
+// sdk/android/api/org/webrtc/DefaultVideoEncoderFactory.java
+@Override
+public VideoEncoder createEncoder(VideoCodecInfo info) {
+  final VideoEncoder softwareEncoder = softwareVideoEncoderFactory.createEncoder(info);
+  final VideoEncoder hardwareEncoder = hardwareVideoEncoderFactory.createEncoder(info);
+  // 若硬编和软编都同时支持该编码器，则返回编码器辅助类，包含硬编和软编
+  if (hardwareEncoder != null && softwareEncoder != null) {
+    // Both hardware and software supported, wrap it in a software fallback
+    return new VideoEncoderFallback(
+      /* fallback= */ softwareEncoder, /* primary= */ hardwareEncoder);
+  }
+  // 否则，仅返回硬编或软编
+  return hardwareEncoder != null ? hardwareEncoder : softwareEncoder;
+}
+
+// sdk/android/api/org/webrtc/SoftwareVideoEncoderFactory.java
+@Override
+public VideoEncoder createEncoder(VideoCodecInfo info) {
+  // 当前软编不支持 H264, 但 Native层内置 InternalEncoderFactory 是支持OpenH264 编码的
+  if (info.name.equalsIgnoreCase("VP8")) {
+    return new LibvpxVp8Encoder();
+  }
+  if (info.name.equalsIgnoreCase("VP9") && LibvpxVp9Encoder.nativeIsSupported()) {
+    return new LibvpxVp9Encoder();
+  }
+
+  return null;
+}
+
+// sdk/android/api/org/webrtc/HardwareVideoEncoderFactory.java
+@Override
+public VideoEncoder createEncoder(VideoCodecInfo input) {
+  // HW encoding is not supported below Android Kitkat.
+  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.KITKAT) {
+    return null;
+  }
+
+  ...
+
+  // 硬编编码器
+  return new HardwareVideoEncoder(new MediaCodecWrapperFactoryImpl(), codecName, type,
+                                  surfaceColorFormat, yuvColorFormat, input.params, getKeyFrameIntervalSec(type),
+                                  getForcedKeyFrameIntervalMs(type, codecName), createBitrateAdjuster(type, codecName),
+                                  sharedContext);
+}
+
+// sdk/android/api/org/webrtc/VideoEncoderFallback.java
+// 同时包含硬编和软编的辅助类
+public VideoEncoderFallback(VideoEncoder fallback, VideoEncoder primary) {
+  this.fallback = fallback;
+  this.primary = primary;
+}
+```
+
+c. 在此以 VideoEncoderFallback 为例往下分析，创建完 Java 层 VideoEncoder 后，需转换成 Native 层 VideoEncoderSoftwareFallbackWrapper。
+
+```c++
+// sdk/android/src/jni/video_encoder_wrapper.cc
+// 若是硬编，则将 Java 层硬编码实例转换为 Native 层 VideoEncoderWrapper 对象；
+// 若是软编，则直接是简单对象指针转换，因为软编是直接创建的Native层对象
+std::unique_ptr<VideoEncoder> JavaToNativeVideoEncoder(
+    JNIEnv* jni,
+    const JavaRef<jobject>& j_encoder) {
+  // 创建具体编码器 Native 对象
+  const jlong native_encoder =
+      Java_VideoEncoder_createNativeVideoEncoder(jni, j_encoder);
+  VideoEncoder* encoder;
+  if (native_encoder == 0) {
+    // 硬编时，需要做一层 JNI 交换，方便调用, j_encoder 为硬编 HardwareVideoEncoder 实例
+    encoder = new VideoEncoderWrapper(jni, j_encoder);
+  } else {
+    // 若是软编，createNativeVideoEncoder() 本身就是创建的 Native 的对象，所以只是指针转换
+    encoder = reinterpret_cast<VideoEncoder*>(native_encoder);
+  }
+  return std::unique_ptr<VideoEncoder>(encoder);
+}
+
+// gen/sdk/android/generated_video_jni/VideoEncoder_jni.h
+static jlong Java_VideoEncoder_createNativeVideoEncoder(JNIEnv* env, const
+    base::android::JavaRef<jobject>& obj) {
+  jclass clazz = org_webrtc_VideoEncoder_clazz(env);
+  CHECK_CLAZZ(env, obj.obj(),
+      org_webrtc_VideoEncoder_clazz(env), 0);
+
+  // JNI 调用 Java 层编码器的 createNativeVideoEncoder() 接口，不同编码器，该接口实现都不一样
+  // 硬编时，该接口调用的是基类VideoEncoder的默认实现，返回0，调用编码器时需要通过JNI操作回调；
+  // 而软编该接口返回的是 C++ 对象指针，调用编码器时直接是指针操作，不需要回到Java层。
+  jni_generator::JniJavaCallContextChecked call_context;
+  call_context.Init<
+      base::android::MethodID::TYPE_INSTANCE>(
+          env,
+          clazz,
+          "createNativeVideoEncoder",
+          "()J",
+          &g_org_webrtc_VideoEncoder_createNativeVideoEncoder);
+
+  jlong ret =
+      env->CallLongMethod(obj.obj(),
+          call_context.base.method_id);
+  return ret;
+}
+```
+
+d. VideoEncoderFallback 实现 createNativeVideoEncoder()。
+
+```java
+// sdk/android/api/org/webrtc/VideoEncoderFallback.java
+@Override
+public long createNativeVideoEncoder() {
+  // 调用 JNI 函数
+  return nativeCreateEncoder(fallback, primary);
+}
+```
+
+e. Native 层 VideoEncoderFallback 的 nativeCreateEncoder() 实现。
+
+```c++
+// gen/sdk/android/generated_video_jni/VideoEncoderFallback_jni.h
+JNI_GENERATOR_EXPORT jlong Java_org_webrtc_VideoEncoderFallback_nativeCreateEncoder(
+    JNIEnv* env,
+    jclass jcaller,
+    jobject fallback,
+    jobject primary) {
+  return JNI_VideoEncoderFallback_CreateEncoder(env, base::android::JavaParamRef<jobject>(env,
+      fallback), base::android::JavaParamRef<jobject>(env, primary));
+}
+
+// sdk/android/src/jni/video_encoder_fallback.cc
+static jlong JNI_VideoEncoderFallback_CreateEncoder(
+    JNIEnv* jni,
+    const JavaParamRef<jobject>& j_fallback_encoder,
+    const JavaParamRef<jobject>& j_primary_encoder) {
+  // 软编返回 C++ 层编码器指针
+  std::unique_ptr<VideoEncoder> fallback_encoder =
+      JavaToNativeVideoEncoder(jni, j_fallback_encoder);
+  // 硬编返回 VideoEncoderWrapper 对象指针
+  std::unique_ptr<VideoEncoder> primary_encoder =
+      JavaToNativeVideoEncoder(jni, j_primary_encoder);
+
+  VideoEncoder* nativeWrapper =
+      CreateVideoEncoderSoftwareFallbackWrapper(std::move(fallback_encoder),
+                                                std::move(primary_encoder))
+          .release();
+
+  return jlongFromPointer(nativeWrapper);
+}
+
+// api/video_codecs/video_encoder_software_fallback_wrapper.cc
+std::unique_ptr<VideoEncoder> CreateVideoEncoderSoftwareFallbackWrapper(
+    std::unique_ptr<VideoEncoder> sw_fallback_encoder,
+    std::unique_ptr<VideoEncoder> hw_encoder,
+    bool prefer_temporal_support) {
+  // prefer_temporal_support 默认 false
+  return std::make_unique<VideoEncoderSoftwareFallbackWrapper>(
+      std::move(sw_fallback_encoder), std::move(hw_encoder),
+      prefer_temporal_support);
+}
+
+VideoEncoderSoftwareFallbackWrapper::VideoEncoderSoftwareFallbackWrapper(
+    std::unique_ptr<webrtc::VideoEncoder> sw_encoder,
+    std::unique_ptr<webrtc::VideoEncoder> hw_encoder,
+    bool prefer_temporal_support)
+    : fec_controller_override_(nullptr),
+      encoder_state_(EncoderState::kUninitialized),
+      encoder_(std::move(hw_encoder)),
+      fallback_encoder_(std::move(sw_encoder)),
+      callback_(nullptr),
+      fallback_params_(
+          GetForcedFallbackParams(prefer_temporal_support, *encoder_)) {
+  RTC_DCHECK(fallback_encoder_);
+}
+```
+
+f. 看看 VideoEncoderSoftwareFallbackWrapper 是如何在硬编和软编之前切换或选择的。
+
+```c
+// api/video_codecs/video_encoder_software_fallback_wrapper.cc
+// 不管是使用硬编还是软编，都必须在初始化编码器的时候就确定下来
+int32_t VideoEncoderSoftwareFallbackWrapper::InitEncode(
+    const VideoCodec* codec_settings,
+    const VideoEncoder::Settings& settings) {
+  // Store settings, in case we need to dynamically switch to the fallback
+  // encoder after a failed Encode call.
+  codec_settings_ = *codec_settings;
+  encoder_settings_ = settings;
+  // Clear stored rate/channel parameters.
+  rate_control_parameters_ = absl::nullopt;
+
+  RTC_DCHECK_EQ(encoder_state_, EncoderState::kUninitialized)
+      << "InitEncode() should never be called on an active instance!";
+
+  // Try to init forced software codec if it should be used.
+  // 尝试强制使用软编，但需要设置 "WebRTC-VP8-Forced-Fallback-Encoder-v2" 为 "Enabled" 才有效
+  if (TryInitForcedFallbackEncoder()) {
+    PrimeEncoder(current_encoder());
+    return WEBRTC_VIDEO_CODEC_OK;
+  }
+
+  // 硬编码器初始化
+  int32_t ret = encoder_->InitEncode(codec_settings, settings);
+  if (ret == WEBRTC_VIDEO_CODEC_OK) {
+    encoder_state_ = EncoderState::kMainEncoderUsed;
+    // 设置当前编码器的回调接口及相关参数，如当前rtt等.
+    PrimeEncoder(current_encoder());
+    return ret;
+  }
+
+  // Try to instantiate software codec.
+  // 若硬编码器初始化失败，尝试初始化软编码器
+  if (InitFallbackEncoder(/*is_forced=*/false)) {
+    PrimeEncoder(current_encoder());
+    return WEBRTC_VIDEO_CODEC_OK;
+  }
+
+  // Software encoder failed too, use original return code.
+  encoder_state_ = EncoderState::kUninitialized;
+  return ret;
+}
+```
+
+g. 再来看下硬编码器的 wrapper 类 VideoEncoderWrapper。
+
+```c++
+// sdk/android/src/jni/video_encoder_wrapper.cc
+VideoEncoderWrapper::VideoEncoderWrapper(JNIEnv* jni,
+                                         const JavaRef<jobject>& j_encoder)
+    : encoder_(jni, j_encoder), int_array_class_(GetClass(jni, "[I")) {
+  // encoder_ 保存 HardwareVideoEncoder 实例, 之后编码器初始化，编码等操作通过该实例完成.
+  initialized_ = false;
+  num_resets_ = 0;
+
+  // Get bitrate limits in the constructor. This is a static property of the
+  // encoder and is expected to be available before it is initialized.
+  encoder_info_.resolution_bitrate_limits = JavaToNativeResolutionBitrateLimits(
+      jni, Java_VideoEncoder_getResolutionBitrateLimits(jni, encoder_));
+}
+```
+
+
+
+最后，Android端视频编码器的类图大概如下:
+
+<img src="https://gitee.com/vintonliu/PicBed/raw/master/uPic/Android-Native-VideoEncoder.png" alt="Android-Native-VideoEncoder" style="zoom:80%;" />
+
+
 
 ### 4.2 视频解码器
 
@@ -3167,4 +3452,21 @@ VideoStreamEncoderInterface* video_stream_encoder,
 
 
 #### 4.2.2 解码器工厂类创建
+
+Java 层代码
+
+```java
+// sdk/android/api/org/webrtc/DefaultVideoDecoderFactory.java
+// 软解码器
+private final VideoDecoderFactory softwareVideoDecoderFactory = new SoftwareVideoDecoderFactory();
+public DefaultVideoDecoderFactory(@Nullable EglBase.Context eglContext) {
+  // 比较常用芯片硬解码器，主要是 三星Exynos, 英特尔Intel, 英伟达Nvidia,高通qcom
+  this.hardwareVideoDecoderFactory = new HardwareVideoDecoderFactory(eglContext);
+  // 也属于硬解，相对可能小众化芯片携带的硬解码器,是 HardwareVideoDecoderFactory 的补充。若需要扩充其他芯片硬解码器
+  // 应该可以在此对象添加。
+  this.platformSoftwareVideoDecoderFactory = new PlatformSoftwareVideoDecoderFactory(eglContext);
+}
+```
+
+
 

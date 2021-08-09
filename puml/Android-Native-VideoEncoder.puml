@@ -1,0 +1,141 @@
+@startuml Android-Native-VideoEncoder
+title <b> Android 端视频编码器类图
+
+abstract class VideoEncoder {
+    + void SetFecControllerOverride(FecControllerOverride* fec_controller_override)
+    ..
+    + int InitEncode(const VideoCodec* codec_settings,
+                         const VideoEncoder::Settings& settings)
+    ..
+    + int32_t RegisterEncodeCompleteCallback(EncodedImageCallback* callback)
+    ..
+    + int32_t Release()
+    ..
+    + int32_t Encode(const VideoFrame& frame,
+                         const std::vector<VideoFrameType>* frame_types)
+    ..
+    + void SetRates(const RateControlParameters& parameters)
+    ..
+    + void OnPacketLossRateUpdate(float packet_loss_rate)
+    ..
+    + void OnRttUpdate(int64_t rtt_ms)
+    ..
+    + void OnLossNotification(const LossNotification& loss_notification)
+    ..
+    + EncoderInfo GetEncoderInfo() const
+}
+
+class VideoEncoderWrapper {
+    + int InitEncode(const VideoCodec* codec_settings,
+                         const VideoEncoder::Settings& settings)
+    ..
+    + int32_t RegisterEncodeCompleteCallback(EncodedImageCallback* callback)
+    ..
+    + int32_t Release()
+    ..
+    + int32_t Encode(const VideoFrame& frame,
+                         const std::vector<VideoFrameType>* frame_types)
+    ..
+    + void SetRates(const RateControlParameters& parameters)
+    ..
+    + EncoderInfo GetEncoderInfo() const
+    ..
+    + void OnEncodedFrame(JNIEnv* jni,
+                      const JavaRef<jobject>& j_encoded_image)
+    ..
+    --
+    - const ScopedJavaGlobalRef<jobject> encoder_
+    ..
+    - EncodedImageCallback* callback_
+    ..
+    - VideoCodec codec_settings_
+    ..
+    - EncoderInfo encoder_info_
+}
+note bottom of VideoEncoderWrapper: 视频硬编 Wrapper 类
+
+class VideoEncoderSoftwareFallbackWrapper {
+    + void SetFecControllerOverride(FecControllerOverride* fec_controller_override)
+    ..
+    + int InitEncode(const VideoCodec* codec_settings,
+                         const VideoEncoder::Settings& settings)
+    ..
+    + int32_t RegisterEncodeCompleteCallback(EncodedImageCallback* callback)
+    ..
+    + int32_t Release()
+    ..
+    + int32_t Encode(const VideoFrame& frame,
+                         const std::vector<VideoFrameType>* frame_types)
+    ..
+    + void SetRates(const RateControlParameters& parameters)
+    ..
+    + void OnPacketLossRateUpdate(float packet_loss_rate)
+    ..
+    + void OnRttUpdate(int64_t rtt_ms)
+    ..
+    + void OnLossNotification(const LossNotification& loss_notification)
+    ..
+    + EncoderInfo GetEncoderInfo() const
+    --
+    - const std::unique_ptr<webrtc::VideoEncoder> encoder_
+    ..
+    - const std::unique_ptr<webrtc::VideoEncoder> fallback_encoder_
+    ..
+    - EncodedImageCallback* callback_
+}
+note bottom of VideoEncoderSoftwareFallbackWrapper : 视频硬编和软编切换Wrapper类
+
+class LibvpxVp8Encoder {
+    + void SetFecControllerOverride(FecControllerOverride* fec_controller_override)
+    ..
+    + int InitEncode(const VideoCodec* codec_settings,
+                         const VideoEncoder::Settings& settings)
+    ..
+    + int32_t RegisterEncodeCompleteCallback(EncodedImageCallback* callback)
+    ..
+    + int32_t Release()
+    ..
+    + int32_t Encode(const VideoFrame& frame,
+                         const std::vector<VideoFrameType>* frame_types)
+    ..
+    + void SetRates(const RateControlParameters& parameters)
+    ..
+    + void OnPacketLossRateUpdate(float packet_loss_rate)
+    ..
+    + void OnRttUpdate(int64_t rtt_ms)
+    ..
+    + void OnLossNotification(const LossNotification& loss_notification)
+    ..
+    + EncoderInfo GetEncoderInfo() const
+    --
+    - EncodedImageCallback* encoded_complete_callback_
+}
+note bottom of LibvpxVp8Encoder : 视频软编VP8编码器
+
+class VP9EncoderImpl {
+    + void SetFecControllerOverride(FecControllerOverride* fec_controller_override)
+    ..
+    + int InitEncode(const VideoCodec* codec_settings,
+                         const VideoEncoder::Settings& settings)
+    ..
+    + int32_t RegisterEncodeCompleteCallback(EncodedImageCallback* callback)
+    ..
+    + int32_t Release()
+    ..
+    + int32_t Encode(const VideoFrame& frame,
+                         const std::vector<VideoFrameType>* frame_types)
+    ..
+    + void SetRates(const RateControlParameters& parameters)
+    ..
+    + EncoderInfo GetEncoderInfo() const
+    --
+    - EncodedImageCallback* encoded_complete_callback_
+}
+note bottom of VP9EncoderImpl: 视频软编VP9编码器
+
+VideoEncoder <|-- VideoEncoderWrapper
+VideoEncoder <|-- VideoEncoderSoftwareFallbackWrapper
+VideoEncoder <|-- LibvpxVp8Encoder
+VideoEncoder <|-- VP9EncoderImpl
+
+@enduml
